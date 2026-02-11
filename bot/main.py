@@ -154,7 +154,7 @@ async def process_with_gemini(text=None, audio_file=None):
     
     except Exception as e:
         logging.error(f"Gemini Error: {e}")
-        return None
+        return {"error": str(e)}
 
 async def save_expense(data, user_id):
     """Saves the expense to Firestore for a specific user."""
@@ -285,6 +285,10 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def respond_to_user(update, extracted, firebase_uid):
     if not extracted:
         await update.message.reply_text("Desculpe, não entendi. Tente de novo.")
+        return
+
+    if extracted.get("error"):
+        await update.message.reply_text(f"❌ Erro no Gemini: {extracted['error']}")
         return
 
     # Check for FALLBACK intent
