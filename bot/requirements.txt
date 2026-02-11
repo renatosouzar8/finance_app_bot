@@ -1,0 +1,6 @@
+python-telegram-bot>=21.0
+firebase-admin==6.4.0
+google-genai
+python-dotenv==1.0.1
+flask
+

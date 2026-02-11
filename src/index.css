@@ -1,0 +1,29 @@
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    font-family: 'Outfit', sans-serif;
+  }
+  body {
+    @apply bg-slate-900 text-slate-100; /* Force Dark Mode Base */
+  }
+}
+
+/* Custom Scrollbar for sleek look */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent; 
+}
+::-webkit-scrollbar-thumb {
+  background: #334155; 
+  border-radius: 10px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #475569; 
+}
