@@ -22,7 +22,10 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 FIREBASE_SERVICE_ACCOUNT = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH")
 # FIREBASE_USER_ID is no longer used globally in multi-user mode
-APP_ID = os.getenv("APP_ID", "default-app-id")
+# Handle empty string from env
+APP_ID = os.getenv("APP_ID")
+if not APP_ID:
+    APP_ID = "default-app-id"
 
 # Logging setup
 logging.basicConfig(
