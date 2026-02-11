@@ -139,7 +139,7 @@ async def process_with_gemini(text=None, audio_file=None):
             logging.info(f"Uploaded audio file: {uploaded_file.name}")
 
         response = client.models.generate_content(
-            model='gemini-2.0-flash',
+            model='gemini-1.5-flash',
             contents=content_parts
         )
         text_response = response.text.strip()
