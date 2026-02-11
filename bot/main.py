@@ -67,10 +67,10 @@ async def save_user_mapping(telegram_id, firebase_user_id):
             "firebaseUserId": firebase_user_id,
             "linkedAt": firestore.SERVER_TIMESTAMP
         })
-        return True
+        return True, ""
     except Exception as e:
         logging.error(f"Save Mapping Error: {e}")
-        return False
+        return False, str(e)
 
 async def process_with_gemini(text=None, audio_file=None):
     """
@@ -216,10 +216,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if args and len(args) > 0:
         firebase_uid = args[0]
-        if await save_user_mapping(user_id, firebase_uid):
+        success, error_msg = await save_user_mapping(user_id, firebase_uid)
+        if success:
             await update.message.reply_text(f"🔐 Conta vinculada com sucesso!\nID: {firebase_uid}\n\nAgora você pode registrar gastos por texto ou áudio.")
         else:
-            await update.message.reply_text("❌ Falha ao vincular conta.")
+            await update.message.reply_text(f"❌ Falha ao vincular conta.\nErro: {error_msg}")
     else:
         # Check if already linked
         existing_uid = await get_firebase_user_id(user_id)
