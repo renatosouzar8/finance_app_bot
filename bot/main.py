@@ -139,9 +139,11 @@ async def process_with_gemini(text=None, audio_file=None):
             logging.info(f"Uploaded audio file: {uploaded_file.name}")
 
         response = client.models.generate_content(
-            model='gemini-1.5-flash',
+            model='gemini-1.5-flash-latest',
             contents=content_parts
         )
+        if not response or not response.text:
+            return {"error": "Sem resposta do Gemini"}
         text_response = response.text.strip()
         
         if text_response.startswith('```json'):
