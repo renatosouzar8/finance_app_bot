@@ -482,6 +482,7 @@ if __name__ == '__main__':
     loop = asyncio.get_event_loop()
     loop.create_task(setup_notification_listener(application, loop))
     
+    print(f"Bot Version: 1.1")
     print(f"Bot is running in MULTI-USER mode (APP_ID: {APP_ID})...")
     keep_alive()
     application.run_polling()
