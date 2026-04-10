@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import FinancialEvolutionChart from './components/FinancialEvolutionChart';
 import FinancialCategoryChart from './components/FinancialCategoryChart';
+import BankSyncWidget from './components/BankSyncWidget';
 import { initializeApp } from 'firebase/app';
 import {
     getAuth,
@@ -543,7 +544,7 @@ const Dashboard = ({ user, handleLogout, theme, toggleTheme, isTelegramModalOpen
     const [editingTransaction, setEditingTransaction] = useState(null);
     const [searchTerm, setSearchTerm] = useState('');
     const [transactionTypeFilter, setTransactionTypeFilter] = useState('all');
-    const [activeTab, setActiveTab] = useState('dashboard'); // 'dashboard' or 'installments'
+    const [activeTab, setActiveTab] = useState('dashboard'); // 'dashboard', 'installments', 'goals', or 'connections'
 
     const [loadingNormalTrans, setLoadingNormalTrans] = useState(true);
     const [loadingPayments, setLoadingPayments] = useState(true);
@@ -870,6 +871,7 @@ const Dashboard = ({ user, handleLogout, theme, toggleTheme, isTelegramModalOpen
                     <button onClick={() => setActiveTab('dashboard')} className={`flex-1 py-2 px-3 rounded-xl text-xs md:text-sm font-medium transition-all duration-300 ${activeTab === 'dashboard' ? 'bg-cyan-500 text-white shadow-lg shadow-cyan-500/25' : 'text-slate-400 hover:text-slate-200'}`}>Visão Geral</button>
                     <button onClick={() => setActiveTab('installments')} className={`flex-1 py-2 px-3 rounded-xl text-xs md:text-sm font-medium transition-all duration-300 ${activeTab === 'installments' ? 'bg-violet-500 text-white shadow-lg shadow-violet-500/25' : 'text-slate-400 hover:text-slate-200'}`}>Parcelas</button>
                     <button onClick={() => setActiveTab('goals')} className={`flex-1 py-2 px-3 rounded-xl text-xs md:text-sm font-medium transition-all duration-300 ${activeTab === 'goals' ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-500/25' : 'text-slate-400 hover:text-slate-200'}`}>Metas</button>
+                    <button onClick={() => setActiveTab('connections')} className={`flex-1 py-2 px-3 rounded-xl text-xs md:text-sm font-medium transition-all duration-300 ${activeTab === 'connections' ? 'bg-cyan-500 text-white shadow-lg shadow-cyan-500/25' : 'text-slate-400 hover:text-slate-200'}`}>Conexões</button>
                 </div>
 
                 {activeTab === 'dashboard' && (
@@ -934,6 +936,12 @@ const Dashboard = ({ user, handleLogout, theme, toggleTheme, isTelegramModalOpen
                 {activeTab === 'goals' && (
                     <div className="space-y-6 animate-fade-in-up">
                         <GoalsSection userId={userId} />
+                    </div>
+                )}
+                
+                {activeTab === 'connections' && (
+                    <div className="space-y-6 animate-fade-in-up">
+                        <BankSyncWidget user={user} />
                     </div>
                 )}
             </main>

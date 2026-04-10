@@ -370,7 +370,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text("❌ Transação não encontrada.")
                 return
             
-            await tx_ref.update({
+            tx_ref.update({
                 "sync_status": "confirmed",
                 "updatedAt": firestore.SERVER_TIMESTAMP
             })
