@@ -2,7 +2,6 @@ import os
 import datetime
 import logging
 import json
-import asyncio
 from dotenv import load_dotenv
 
 import firebase_admin
@@ -347,118 +346,9 @@ async def respond_to_user(update, extracted, firebase_uid):
     else:
         await update.message.reply_text("Não entendi se é para registrar ou consultar. Tente ser mais claro.")
 
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles interactions with inline buttons."""
-    query = update.callback_query
-    await query.answer()
-    
-    data = query.data
-    user_id = str(update.effective_user.id)
-    firebase_uid = await get_firebase_user_id(user_id)
-    
-    if not firebase_uid:
-        await query.edit_message_text("⚠️ Conta não vinculada.")
-        return
-
-    if data.startswith("confirm_tx:"):
-        tx_id = data.split(":")[1]
-        try:
-            tx_ref = db.collection(f"artifacts/{APP_ID}/users/{firebase_uid}/transactions").document(tx_id)
-            doc = tx_ref.get()
-            
-            if not doc.exists:
-                await query.edit_message_text("❌ Transação não encontrada.")
-                return
-            
-            tx_ref.update({
-                "sync_status": "confirmed",
-                "updatedAt": firestore.SERVER_TIMESTAMP
-            })
-            
-            await query.edit_message_text(f"✅ Transação confirmada com sucesso! \n({doc.to_dict().get('description')})")
-            
-        except Exception as e:
-            logging.error(f"Error confirming transaction: {e}")
-            await query.edit_message_text(f"❌ Erro ao confirmar: {str(e)}")
-
-    elif data.startswith("edit_tx:"):
-        await query.edit_message_text("✏️ Para editar, acesse o app web: https://my-finance-app-24d0f.web.app")
-
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Log the error and send a telegram message to notify the developer."""
     logging.error(msg="Exception while handling an update:", exc_info=context.error)
-
-async def setup_notification_listener(application, loop):
-    """Listens for new notifications in the Firestore queue."""
-    logging.info("Starting Firestore notification listener...")
-    
-    def on_snapshot(col_snapshot, changes, read_time):
-        for change in changes:
-            if change.type.name == 'ADDED':
-                doc = change.document
-                data = doc.to_dict()
-                
-                if data.get("status") == "pending":
-                    # Submete a corotina para o loop principal do Telegram
-                    asyncio.run_coroutine_threadsafe(
-                        send_notification(application, doc.id, data),
-                        loop
-                    )
-
-    col_query = db.collection(f"artifacts/{APP_ID}/notification_queue").where("status", "==", "pending")
-    col_query.on_snapshot(on_snapshot)
-
-async def send_notification(application, doc_id, data):
-    """Sends the actual telegram message and marks as sent."""
-    telegram_id = data.get("telegramId")
-    tx = data.get("transaction")
-    firebase_uid = data.get("firebaseUserId")
-    
-    if not telegram_id or not tx:
-        return
-
-    message = (
-        f"📌 *Nova Transação (Open Finance)*\n\n"
-        f"💰 *Valor:* R$ {abs(tx['amount']):.2f}\n"
-        f"📝 *Descrição:* {tx['description']}\n"
-        f"📂 *Categoria:* {tx.get('category', 'Open Finance')}\n\n"
-        f"Deseja confirmar este lançamento?"
-    )
-    
-    # Check if transaction exists to link it correctly
-    # Note: We need the doc ID in our system, not the external Pluggy ID
-    # But for now we can search for it
-    tx_query = db.collection(f"artifacts/{APP_ID}/users/{firebase_uid}/transactions")\
-                 .where("external_id", "==", tx['id']).limit(1).get()
-    
-    reply_markup = None
-    if tx_query:
-        internal_id = tx_query[0].id
-        keyboard = [
-            [
-                InlineKeyboardButton("✅ Confirmar", callback_data=f"confirm_tx:{internal_id}"),
-                InlineKeyboardButton("✏️ Editar", callback_data=f"edit_tx:{internal_id}")
-            ]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-    try:
-        await application.bot.send_message(
-            chat_id=telegram_id,
-            text=message,
-            parse_mode='Markdown',
-            reply_markup=reply_markup
-        )
-        
-        # Mark as sent
-        db.collection(f"artifacts/{APP_ID}/notification_queue").document(doc_id).update({
-            "status": "sent",
-            "sentAt": firestore.SERVER_TIMESTAMP
-        })
-        logging.info(f"Notification sent to {telegram_id} for tx {tx['id']}")
-        
-    except Exception as e:
-        logging.error(f"Error sending notification: {e}")
 
 if __name__ == '__main__':
     if not TELEGRAM_TOKEN:
@@ -475,12 +365,8 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler('start', start))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     application.add_handler(MessageHandler(filters.VOICE, handle_voice))
-    application.add_handler(CallbackQueryHandler(handle_callback))
     application.add_error_handler(error_handler)
     
-    # Start Firestore Listener in background
-    loop = asyncio.get_event_loop()
-    loop.create_task(setup_notification_listener(application, loop))
     
     print(f"Bot Version: 1.1")
     print(f"Bot is running in MULTI-USER mode (APP_ID: {APP_ID})...")
