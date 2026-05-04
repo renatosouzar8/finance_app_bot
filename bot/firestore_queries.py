@@ -35,29 +35,34 @@ def query_expenses_by_period(db, app_id: str, user_id: str,
     all_expenses = []
     collections_to_query = ["transactions", "installment_payments"]
     
-    logger.info(f"Sofia Query Start: {start_dt} End: {end_dt} Category: {category}")
+    # Trim and lowercase category for robust matching
+    target_category = category.strip().lower() if category else None
+    
+    logger.info(f"Sofia Query Start: {start_dt} End: {end_dt} Category: {category} (Target: {target_category})")
     
     for coll in collections_to_query:
         try:
             collection_path = f"artifacts/{app_id}/users/{user_id}/{coll}"
+            # Fetch EVERYTHING in the date range to be 100% sure we don't miss anything due to indexing
             query_ref = db.collection(collection_path).where("date", ">=", start_dt).where("date", "<=", end_dt)
             
-            if category:
-                query_ref = query_ref.where("category", "==", category)
-
             docs = list(query_ref.stream())
             found_count = 0
             for d in docs:
                 data = d.to_dict()
-                # Debug: log the first doc found in each collection
-                if found_count == 0:
-                    logger.info(f"Sofia Sample doc from {coll}: {data.get('description')} | type: {data.get('type')} | cat: {data.get('category')}")
                 
-                if data.get("type") == "expense":
-                    all_expenses.append(data)
-                    found_count += 1
+                # Manual filtering in Python
+                item_type = str(data.get("type", "")).strip().lower()
+                item_category = str(data.get("category", "")).strip().lower()
+                
+                # Check if it's an expense
+                if item_type == "expense":
+                    # Check if category matches (if provided)
+                    if not target_category or item_category == target_category:
+                        all_expenses.append(data)
+                        found_count += 1
             
-            logger.info(f"Sofia Query: {coll} found {len(docs)} total docs, {found_count} were expenses.")
+            logger.info(f"Sofia Query: {coll} found {len(docs)} total docs in range, {found_count} matched filters.")
                     
         except Exception as e:
             logger.error(f"query_expenses_by_period error in collection {coll}: {e}")
