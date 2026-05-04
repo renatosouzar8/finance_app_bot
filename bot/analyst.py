@@ -1,6 +1,7 @@
 import datetime
 import logging
 import calendar
+from typing import Optional, Union, Dict, Any, List
 
 from firestore_queries import (
     get_monthly_category_total,
@@ -53,7 +54,7 @@ class Sofia:
         self.app_id = app_id
         self.client = gemini_client
         self.user_id = user_id
-        self._state: dict | None = None
+        self._state: Optional[dict] = None
 
     def _load_state(self) -> dict:
         if self._state is None:
@@ -92,7 +93,7 @@ class Sofia:
             logger.error(f"Sofia Gemini error: {e}")
             return ""
 
-    async def check_after_register(self, amount: float, category: str) -> str | None:
+    async def check_after_register(self, amount: float, category: str) -> Optional[str]:
         state = self._load_state()
 
         high_spend_msg = None
@@ -125,7 +126,7 @@ class Sofia:
         return None
 
     async def build_query_response(self, start_date: str, end_date: str,
-                                    category: str | None) -> str:
+                                    category: Optional[str]) -> str:
         start_dt = datetime.datetime.fromisoformat(start_date)
         end_dt = datetime.datetime.fromisoformat(end_date) + datetime.timedelta(
             hours=23, minutes=59, seconds=59

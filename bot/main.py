@@ -481,7 +481,7 @@ if __name__ == '__main__':
     scheduler = setup_scheduler(application)
     scheduler.start()
 
-    print(f"Bot Version: 2.0 (Sofia enabled)")
+    print(f"Bot Version: 2.1 (Sofia enabled)")
     print(f"Bot is running in MULTI-USER mode (APP_ID: {APP_ID})...")
     keep_alive()
     application.run_polling()
