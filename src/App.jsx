@@ -1148,7 +1148,6 @@ const Dashboard = ({ user, handleLogout, theme, toggleTheme, isTelegramModalOpen
                     <button id="tab-orcamento" onClick={() => setActiveTab('orcamento')} className={`flex-1 py-2 px-2 rounded-xl text-xs md:text-sm font-medium transition-all duration-300 whitespace-nowrap ${activeTab === 'orcamento' ? 'bg-amber-500 text-slate-900 shadow-lg shadow-amber-500/25' : 'text-slate-400 hover:text-slate-200'}`}>Orçamento</button>
                     <button id="tab-installments" onClick={() => setActiveTab('installments')} className={`flex-1 py-2 px-2 rounded-xl text-xs md:text-sm font-medium transition-all duration-300 whitespace-nowrap ${activeTab === 'installments' ? 'bg-violet-500 text-white shadow-lg shadow-violet-500/25' : 'text-slate-400 hover:text-slate-200'}`}>Parcelas</button>
                     <button id="tab-goals" onClick={() => setActiveTab('goals')} className={`flex-1 py-2 px-2 rounded-xl text-xs md:text-sm font-medium transition-all duration-300 whitespace-nowrap ${activeTab === 'goals' ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-500/25' : 'text-slate-400 hover:text-slate-200'}`}>Metas</button>
-                    <button id="tab-connections" onClick={() => setActiveTab('connections')} className={`flex-1 py-2 px-2 rounded-xl text-xs md:text-sm font-medium transition-all duration-300 whitespace-nowrap ${activeTab === 'connections' ? 'bg-cyan-500 text-white shadow-lg shadow-cyan-500/25' : 'text-slate-400 hover:text-slate-200'}`}>Conexões</button>
                 </div>
 
                 {activeTab === 'dashboard' && (
@@ -1267,12 +1266,6 @@ const Dashboard = ({ user, handleLogout, theme, toggleTheme, isTelegramModalOpen
                 {activeTab === 'goals' && (
                     <div className="space-y-6 animate-fade-in-up">
                         <GoalsSection userId={userId} />
-                    </div>
-                )}
-                
-                {activeTab === 'connections' && (
-                    <div className="space-y-6 animate-fade-in-up">
-                        <BankSyncWidget user={user} />
                     </div>
                 )}
             </main>
