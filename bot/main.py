@@ -2,6 +2,7 @@ import os
 import datetime
 import logging
 import json
+import random
 from dotenv import load_dotenv
 
 import firebase_admin
@@ -52,6 +53,16 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 CATEGORIES = [
     'Moradia', 'Alimentação', 'Transporte', 'Lazer', 'Saúde', 
     'Educação', 'Compras', 'Impostos', 'Serviços', 'Dívidas', 'Outros'
+]
+
+# Sofia off-topic replies (humorous, in character)
+SOFIA_OFFTOPIC_REPLIES = [
+    "😄 Adoro o entusiasmo! Mas minha especialidade é só dinheiro — receita de bolo fica pra outra conta! Posso te ajudar com seus gastos?",
+    "🤭 Boa tentativa! Sou a Sofia, analista financeira. Código de programação e receitas de comida ficam fora do meu extrato. Fala de finanças?",
+    "💸 Isso está bem fora do meu orçamento de conhecimento! Só processo números financeiros por aqui. Quer ver como estão seus gastos?",
+    "😂 Interessante! Mas se não envolve R$, não é comigo. Sou especialista em controle de gastos, não em gastronomia (nem em programação). O que você gastou hoje?",
+    "🙈 Sou uma analista financeira muito focada — só falo de dinheiro, orçamento e gastos. Pra tudo mais, existe o Google! 😄 Posso te ajudar com suas finanças?",
+    "🏦 Hmm, isso foge das minhas atribuições! Minha mesa só tem planilhas financeiras. Quer registrar um gasto ou ver um resumo do mês?",
 ]
 
 async def get_all_mapped_users() -> list[dict]:
@@ -105,51 +116,39 @@ async def process_with_gemini(text=None, audio_file=None):
     current_date = datetime.date.today().isoformat()
     
     system_prompt = f"""
-    You are a financial assistant. 
+    You are a strict financial intent classifier for a personal finance bot named Sofia.
     Current Date: {current_date}
-    Available Categories: {', '.join(CATEGORIES)}
+    Available Expense Categories: {', '.join(CATEGORIES)}
 
-    Analyze the user's input (Text or Audio).
-    
-    Determine if the user is REGISTERING an expense or QUERYING expenses.
-
-    Format your response as a JSON object.
+    Analyze the user's input (Text or Audio) and classify the intent.
+    Return ONLY a valid JSON object. Do NOT wrap in markdown code blocks.
 
     ### Scenario 1: Registering an Expense
-    If the user matches "spent", "paid", "bought" etc. return:
-    {{
-        "intent": "REGISTER",
-        "amount": <number>,
-        "category": <exact category from list or "Outros">,
-        "description": <short text description>,
-        "date": <ISO date string YYYY-MM-DD>
-    }}
-    
-    ### Scenario 2: Querying Expenses
-    If the user asks about spending history, return:
-    {{
-        "intent": "QUERY",
-        "category": <specific category name OR null if all>,
-        "start_date": <ISO date string YYYY-MM-DD>,
-        "end_date": <ISO date string YYYY-MM-DD>
-    }}
-    
-    ### Scenario 3: Monthly Summary
-    If the user asks "resumo do mês", "como estou", "relatório", "situação dos gastos", "quanto gastei esse mês", return:
-    {{
-        "intent": "SUMMARY_MONTH"
-    }}
+    If the user is reporting spending money ("gastei", "paguei", "comprei", "spent", "paid", "bought", etc.) return:
+    {{"intent": "REGISTER", "amount": <number>, "category": <exact category from list or "Outros">, "description": <short text>, "date": <YYYY-MM-DD>}}
 
-    ### Scenario 4: Fallback / More Details
-    If the user asks something unrelated to finance, OR asks for complex charts/visuals, OR wants to see the dashboard, return:
-    {{
-        "intent": "FALLBACK"
-    }}
-    
-    For "today", start/end = {current_date}.
-    For "yesterday", both = yesterday's date.
-    
-    Do not wrap the JSON in markdown code blocks. Just valid JSON.
+    ### Scenario 2: Querying Expenses
+    If the user asks about their past or current spending history, return:
+    {{"intent": "QUERY", "category": <category name or null>, "start_date": <YYYY-MM-DD>, "end_date": <YYYY-MM-DD>}}
+
+    ### Scenario 3: Monthly Summary
+    If the user asks for a monthly overview ("resumo", "como estou", "relatório", "quanto gastei esse mês", "situação"), return:
+    {{"intent": "SUMMARY_MONTH"}}
+
+    ### Scenario 4: Off-Topic (NOT related to personal finance at all)
+    If the user asks about programming, recipes, jokes, sports, general knowledge, weather, homework,
+    or ANYTHING that has absolutely no relation to personal finance, spending, or budget, return:
+    {{"intent": "OFFTOPIC"}}
+
+    ### Scenario 5: Dashboard / Visuals
+    If the user asks for charts, graphs, or things better seen in the app dashboard, return:
+    {{"intent": "FALLBACK"}}
+
+    Rules:
+    - For "hoje" / "today": start_date and end_date = {current_date}
+    - For "ontem" / "yesterday": both = yesterday's date
+    - When in doubt between QUERY and OFFTOPIC, prefer QUERY if there is ANY financial context.
+    - When in doubt between OFFTOPIC and FALLBACK, use OFFTOPIC for clearly non-financial content.
     """
     
     try:
@@ -322,9 +321,14 @@ async def respond_to_user(update, context, extracted, firebase_uid):
 
     intent = extracted.get("intent")
 
+    if intent == "OFFTOPIC":
+        reply = random.choice(SOFIA_OFFTOPIC_REPLIES)
+        await update.message.reply_text(reply)
+        return
+
     if intent == "FALLBACK":
         await update.message.reply_text(
-            "📱 Para estas informações e muito mais, acesse o app completo: https://my-finance-app-24d0f.web.app"
+            "📱 Para gráficos e informações detalhadas, acesse o app completo: https://my-finance-app-24d0f.web.app"
         )
         return
 
