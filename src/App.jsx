@@ -350,9 +350,11 @@ const TransactionForm = ({ isOpen, onClose, onSave, editingTransaction, currentM
                 <div>
                     <div className="flex justify-between items-center">
                         <label htmlFor="category-transaction-form" className="block text-sm font-medium text-slate-300 dark:text-slate-700">Categoria</label>
+                        {false && (
                         <button type="button" onClick={handleSuggestCategory} disabled={isSuggestingCategory || !description || !GEMINI_API_KEY} className="text-xs bg-teal-600 hover:bg-teal-500 text-white font-semibold py-1 px-2 rounded-md flex items-center disabled:opacity-50">
                             {isSuggestingCategory ? (<><Loader2 size={14} className="mr-1 animate-spin" /> Sugerindo...</>) : (<><Zap size={14} className="mr-1" /> ✨ Sugerir</>)}
                         </button>
+                        )}
                     </div>
                     <select id="category-transaction-form" value={category} onChange={(e) => setCategory(e.target.value)} required className="mt-1 w-full p-3 bg-slate-700 rounded-lg dark:bg-gray-200 dark:text-slate-900">
                         <option value="">Selecione</option>

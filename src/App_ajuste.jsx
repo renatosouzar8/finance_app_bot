@@ -289,9 +289,11 @@ const TransactionForm = ({ isOpen, onClose, onSave, editingTransaction, currentM
                 <div>
                     <div className="flex justify-between items-center">
                         <label htmlFor="category-transaction-form" className="block text-sm font-medium text-slate-300 dark:text-slate-700">Categoria</label>
+                        {false && (
                         <button type="button" onClick={handleSuggestCategory} disabled={isSuggestingCategory || !description || !GEMINI_API_KEY} className="text-xs bg-teal-600 hover:bg-teal-500 text-white font-semibold py-1 px-2 rounded-md flex items-center disabled:opacity-50">
                             {isSuggestingCategory ? (<><Loader2 size={14} className="mr-1 animate-spin" /> Sugerindo...</>) : (<><Zap size={14} className="mr-1" /> ✨ Sugerir</>)}
                         </button>
+                        )}
                     </div>
                     <select id="category-transaction-form" value={category} onChange={(e) => setCategory(e.target.value)} required className="mt-1 w-full p-3 bg-slate-700 rounded-lg dark:bg-gray-200 dark:text-slate-900"><option value="">Selecione</option>{categoriesToShow.map(cat => <option key={cat} value={cat}>{cat}</option>)}</select>{suggestionError && <p className="text-red-400 text-xs mt-1">{suggestionError}</p>}
                 </div>
@@ -945,7 +947,9 @@ const Dashboard = ({ user, handleLogout, theme, toggleTheme }) => {
                     {financialInsight && !isLoadingInsight && <p className="text-sm text-slate-300 dark:text-slate-700">{financialInsight}</p>}
                     {insightError && !isLoadingInsight && <p className="text-sm text-red-400 dark:text-red-600">{insightError}</p>}
                     {!financialInsight && !isLoadingInsight && !insightError && <p className="text-sm text-slate-500 dark:text-gray-400">Clique abaixo!</p>}
+                    {false && (
                     <button onClick={handleGenerateFinancialInsight} disabled={isLoadingInsight || !GEMINI_API_KEY} className="mt-auto w-full bg-purple-600 hover:bg-purple-500 dark:bg-purple-700 dark:hover:bg-purple-600 text-white py-2 px-3 rounded-lg flex items-center justify-center disabled:opacity-50 text-sm"><Zap size={16} className="mr-2" /> {isLoadingInsight ? "Analisando..." : "✨ Gerar Dica"}</button>
+                    )}
                 </div>
             </div>
 
