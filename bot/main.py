@@ -24,10 +24,13 @@ from firestore_queries import (
     save_income,
     save_expense_with_card,
     save_installment_purchase,
+    get_user_categories,
+    create_category,
 )
 
 # ── Conversation states ────────────────────────────────────────────────────────
-ASK_CARD, ASK_WHICH_CARD, ASK_NEW_CARD_NAME, ASK_INSTALLMENT, ASK_NUM_INSTALLMENTS = range(5)
+ASK_CARD, ASK_WHICH_CARD, ASK_NEW_CARD_NAME, ASK_INSTALLMENT, ASK_NUM_INSTALLMENTS, \
+    ASK_CATEGORY, ASK_NEW_CATEGORY_NAME = range(7)
 CONV_TIMEOUT = 300  # 5 minutes
 
 # Load environment variables
@@ -61,7 +64,7 @@ logger = logging.getLogger(__name__)
 # Gemini Setup
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-# Categories (matching frontend)
+# Default categories (used by Gemini prompt when user has no custom categories)
 CATEGORIES = [
     'Moradia', 'Alimentação', 'Transporte', 'Lazer', 'Saúde',
     'Educação', 'Compras', 'Impostos', 'Serviços', 'Dívidas', 'Outros'
@@ -120,18 +123,20 @@ async def save_user_mapping(telegram_id, firebase_user_id):
         logging.error(f"Save Mapping Error: {e}")
         return False, str(e)
 
-async def process_with_gemini(text=None, audio_file=None):
+async def process_with_gemini(text=None, audio_file=None, user_categories: list = None):
     """
     Uses Gemini to extract expense data or identify query intent.
     Supports Text OR Audio inputs.
+    user_categories: optional list of expense categories to use (overrides default CATEGORIES).
     """
     
     current_date = datetime.date.today().isoformat()
+    expense_cats = user_categories if user_categories else CATEGORIES
     
     system_prompt = f"""
     You are a strict financial intent classifier for a personal finance bot named Sofia.
     Current Date: {current_date}
-    Expense Categories: {', '.join(CATEGORIES)}
+    Expense Categories: {', '.join(expense_cats)}
     Income Categories: {', '.join(INCOME_CATEGORIES)}
 
     Analyze the user's input and return ONLY a valid JSON object. No markdown.
@@ -337,9 +342,13 @@ async def _handle_classify(update: Update, context: ContextTypes.DEFAULT_TYPE, e
         # Store parsed data and start multi-step conversation
         context.user_data["tx"] = extracted
         context.user_data["firebase_uid"] = firebase_uid
+        # Load and cache user categories for this conversation
+        user_cats = get_user_categories(db, APP_ID, firebase_uid)
+        context.user_data["user_categories"] = user_cats
         keyboard = [
             [InlineKeyboardButton("💳 Sim, foi no cartão", callback_data="card_yes"),
-             InlineKeyboardButton("💵 Não, à vista", callback_data="card_no")]
+             InlineKeyboardButton("💵 Não, à vista", callback_data="card_no")],
+            [InlineKeyboardButton("✏️ Alterar Categoria", callback_data="change_category")],
         ]
         await update.message.reply_text(
             f"{_expense_confirmation(extracted)}\n\n💳 Foi no cartão de crédito?",
@@ -372,7 +381,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("⚠️ Você precisa vincular sua conta primeiro.\nEnvie `/start <SEU_ID>`")
         return ConversationHandler.END
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
-    extracted = await process_with_gemini(text=update.message.text)
+    user_cats = get_user_categories(db, APP_ID, firebase_uid)
+    extracted = await process_with_gemini(text=update.message.text, user_categories=user_cats)
     if not extracted or extracted.get("error"):
         await update.message.reply_text("Desculpe, não entendi. Tente novamente.")
         return ConversationHandler.END
@@ -389,7 +399,8 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     voice_file = await context.bot.get_file(update.message.voice.file_id)
     file_path = f"voice_{user_id}.ogg"
     await voice_file.download_to_drive(file_path)
-    extracted = await process_with_gemini(audio_file=file_path)
+    user_cats = get_user_categories(db, APP_ID, firebase_uid)
+    extracted = await process_with_gemini(audio_file=file_path, user_categories=user_cats)
     try:
         if os.path.exists(file_path):
             os.remove(file_path)
@@ -404,9 +415,30 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 # ── ConversationHandler step callbacks ───────────────────────────────────────────────
 
 async def ask_card_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """User chose Yes/No for credit card."""
+    """User chose Yes/No/ChangeCategory for credit card step."""
     query = update.callback_query
     await query.answer()
+
+    if query.data == "change_category":
+        # Show category picker
+        user_cats = context.user_data.get("user_categories", get_user_categories(db, APP_ID, context.user_data.get("firebase_uid")))
+        # Build buttons: 2 per row
+        cat_buttons = []
+        row = []
+        for i, cat in enumerate(user_cats):
+            row.append(InlineKeyboardButton(cat, callback_data=f"cat_pick_{cat}"))
+            if len(row) == 2:
+                cat_buttons.append(row)
+                row = []
+        if row:
+            cat_buttons.append(row)
+        cat_buttons.append([InlineKeyboardButton("➕ Nova Categoria", callback_data="cat_new")])
+        await query.edit_message_text(
+            "🏷️ Escolha a categoria:",
+            reply_markup=InlineKeyboardMarkup(cat_buttons)
+        )
+        return ASK_CATEGORY
+
     if query.data == "card_no":
         # Save as plain expense
         tx = context.user_data.get("tx", {})
@@ -518,20 +550,83 @@ async def ask_num_installments_cb(update: Update, context: ContextTypes.DEFAULT_
     card_id = context.user_data.get("credit_card_id")
     ok = save_installment_purchase(db, APP_ID, fuid, tx, n, credit_card_id=card_id)
     if ok:
-        amount = float(tx['amount'])
-        total = amount * n
+        total = float(tx['amount'])
+        amount_per = total / n
         await update.message.reply_text(
             f"✅ Parcelamento salvo: {tx['description']}\n"
-            f"{n}x de R$ {amount:.2f} = R$ {total:.2f} total\n"
+            f"{n}x de R$ {amount_per:.2f} = R$ {total:.2f} total\n"
             f"Categoria: {tx['category']}".replace(".", ",")
         )
         sofia = Sofia(db, APP_ID, client, fuid)
-        alert = await sofia.check_after_register(amount, tx['category'])
+        alert = await sofia.check_after_register(amount_per, tx['category'])
         if alert:
             await update.message.reply_text(alert)
     else:
         await update.message.reply_text("❌ Erro ao salvar parcelamento. Tente novamente.")
     return ConversationHandler.END
+
+
+async def ask_category_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """User picked a category from the list or wants to create a new one."""
+    query = update.callback_query
+    await query.answer()
+    if query.data == "cat_new":
+        await query.edit_message_text("🏷️ Como quer chamar a nova categoria? (ex: Pets, Viagens, Academia)")
+        return ASK_NEW_CATEGORY_NAME
+    # Existing category selected
+    cat = query.data.replace("cat_pick_", "")
+    tx = context.user_data.get("tx", {})
+    tx["category"] = cat
+    context.user_data["tx"] = tx
+    # Back to card question
+    keyboard = [
+        [InlineKeyboardButton("💳 Sim, foi no cartão", callback_data="card_yes"),
+         InlineKeyboardButton("💵 Não, à vista", callback_data="card_no")],
+        [InlineKeyboardButton("✏️ Alterar Categoria", callback_data="change_category")],
+    ]
+    amount = float(tx['amount'])
+    await query.edit_message_text(
+        f"✅ Categoria: {cat} | R$ {amount:.2f} — {tx['description']}".replace(".", ",", 1) +
+        "\n\n💳 Foi no cartão de crédito?",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return ASK_CARD
+
+
+async def ask_new_category_name_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """User typed the name for a new custom category."""
+    name = update.message.text.strip()
+    if not name:
+        await update.message.reply_text("Por favor, informe o nome da categoria.")
+        return ASK_NEW_CATEGORY_NAME
+    fuid = context.user_data.get("firebase_uid")
+    ok = create_category(db, APP_ID, fuid, name)
+    if not ok:
+        await update.message.reply_text("❌ Erro ao criar categoria. Tente novamente.")
+        return ConversationHandler.END
+    # Update tx with new category
+    tx = context.user_data.get("tx", {})
+    tx["category"] = name
+    context.user_data["tx"] = tx
+    # Update cached category list
+    user_cats = context.user_data.get("user_categories", [])
+    if name not in user_cats:
+        user_cats.append(name)
+        context.user_data["user_categories"] = user_cats
+    # Back to card question
+    keyboard = [
+        [InlineKeyboardButton("💳 Sim, foi no cartão", callback_data="card_yes"),
+         InlineKeyboardButton("💵 Não, à vista", callback_data="card_no")],
+        [InlineKeyboardButton("✏️ Alterar Categoria", callback_data="change_category")],
+    ]
+    amount = float(tx['amount'])
+    await update.message.reply_text(
+        f"✅ Categoria '{name}' criada!\n"
+        f"R$ {amount:.2f} — {tx['description']}".replace(".", ",", 1) +
+        "\n\n💳 Foi no cartão de crédito?",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return ASK_CARD
 
 
 async def conv_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -659,7 +754,7 @@ if __name__ == '__main__':
         ],
         states={
             ASK_CARD: [
-                CallbackQueryHandler(ask_card_cb, pattern="^card_(yes|no)$"),
+                CallbackQueryHandler(ask_card_cb, pattern="^(card_yes|card_no|change_category)$"),
             ],
             ASK_WHICH_CARD: [
                 CallbackQueryHandler(ask_which_card_cb, pattern="^(card_id_.+|card_new)$"),
@@ -672,6 +767,12 @@ if __name__ == '__main__':
             ],
             ASK_NUM_INSTALLMENTS: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, ask_num_installments_cb),
+            ],
+            ASK_CATEGORY: [
+                CallbackQueryHandler(ask_category_cb, pattern="^(cat_pick_.+|cat_new)$"),
+            ],
+            ASK_NEW_CATEGORY_NAME: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, ask_new_category_name_cb),
             ],
             ConversationHandler.TIMEOUT: [MessageHandler(filters.ALL, conv_timeout)],
         },
@@ -688,7 +789,7 @@ if __name__ == '__main__':
     scheduler = setup_scheduler(application)
     scheduler.start()
 
-    print(f"Bot Version: 2.3 (income + card + installments)")
+    print(f"Bot Version: 2.4 (income + card + installments + custom categories)")
     print(f"Bot is running in MULTI-USER mode (APP_ID: {APP_ID})...")
     keep_alive()
     application.run_polling()

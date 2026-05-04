@@ -32,3 +32,11 @@ venv/
 my-finance-app.json
 firebase_key.json
 
+# Arquivos de chaves/segredos
+*.txt
+!README*.txt
+keys*.txt
+*key*.txt
+*secret*.txt
+.venv/
+

@@ -175,13 +175,17 @@ const TransactionForm = ({ isOpen, onClose, onSave, editingTransaction, currentM
     const [isSuggestingCategory, setIsSuggestingCategory] = useState(false);
     const [suggestionError, setSuggestionError] = useState('');
     const [formError, setFormError] = useState('');
-    // Credit card state
     const [isCreditCard, setIsCreditCard] = useState(false);
     const [cards, setCards] = useState([]);
     const [selectedCardId, setSelectedCardId] = useState('');
     const [newCardName, setNewCardName] = useState('');
     const [showNewCardInput, setShowNewCardInput] = useState(false);
     const cardsPath = userId ? `artifacts/${appId}/users/${userId}/cards` : null;
+    // Custom categories state
+    const [customExpenseCategories, setCustomExpenseCategories] = useState([]);
+    const [showNewCategoryInput, setShowNewCategoryInput] = useState(false);
+    const [newCategoryName, setNewCategoryName] = useState('');
+    const categoriesPath = userId ? `artifacts/${appId}/users/${userId}/categories` : null;
 
     const isEditing = !!editingTransaction;
     const isEditingInstallment = isEditing && (editingTransaction.isInstallmentOriginal || editingTransaction.isInstallmentPayment);
@@ -193,6 +197,17 @@ const TransactionForm = ({ isOpen, onClose, onSave, editingTransaction, currentM
         const unsub = onSnapshot(q, (snap) => setCards(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
         return () => unsub();
     }, [cardsPath, isOpen]);
+
+    // Load custom categories from Firestore
+    useEffect(() => {
+        if (!categoriesPath || !isOpen) return;
+        const q = query(collection(db, categoriesPath), orderBy('name'));
+        const unsub = onSnapshot(q, (snap) => {
+            const names = snap.docs.map(d => d.data().name).filter(Boolean);
+            setCustomExpenseCategories(names);
+        });
+        return () => unsub();
+    }, [categoriesPath, isOpen]);
 
     useEffect(() => {
         if (editingTransaction) {
@@ -213,7 +228,8 @@ const TransactionForm = ({ isOpen, onClose, onSave, editingTransaction, currentM
             setDate(currentMonth ? startOfMonth(currentMonth) : new Date());
             setType(TRANSACTION_TYPES.EXPENSE); setCategory('');
             setIsInstallment(false); setNumberOfInstallments(10);
-            setIsCreditCard(false); setSelectedCardId(''); setNewCardName(''); setShowNewCardInput(false);
+        setIsCreditCard(false); setSelectedCardId(''); setNewCardName(''); setShowNewCardInput(false);
+            setShowNewCategoryInput(false); setNewCategoryName('');
         }
         setSuggestionError(''); setFormError('');
     }, [editingTransaction, isOpen, currentMonth]);
@@ -228,21 +244,31 @@ const TransactionForm = ({ isOpen, onClose, onSave, editingTransaction, currentM
         } catch (e) { setFormError('Erro ao criar cartão.'); }
     };
 
+    const handleCreateCategory = async () => {
+        if (!newCategoryName.trim() || !categoriesPath) return;
+        try {
+            await addDoc(collection(db, categoriesPath), { name: newCategoryName.trim(), createdAt: Timestamp.now() });
+            setCategory(newCategoryName.trim());
+            setNewCategoryName('');
+            setShowNewCategoryInput(false);
+        } catch (e) { setFormError('Erro ao criar categoria.'); }
+    };
+
     const handleSuggestCategory = async () => {
         if (!description) { setSuggestionError("Insira uma descrição."); return; }
         if (!GEMINI_API_KEY) { setSuggestionError("Chave da API Gemini não configurada."); return; }
 
         setIsSuggestingCategory(true); setSuggestionError(''); setFormError('');
         try {
-            const relevantCategories = type === TRANSACTION_TYPES.EXPENSE ? CATEGORIES.EXPENSE : CATEGORIES.INCOME;
+            // Use merged category list so Gemini can suggest custom categories too
+            const mergedExpenseCats = [...CATEGORIES.EXPENSE, ...customExpenseCategories.filter(c => !CATEGORIES.EXPENSE.includes(c))];
+            const relevantCategories = type === TRANSACTION_TYPES.EXPENSE ? mergedExpenseCats : CATEGORIES.INCOME;
             const prompt = `Descrição da transação: "${description}". Categorias de ${type === TRANSACTION_TYPES.EXPENSE ? 'Despesa' : 'Receita'}: ${relevantCategories.join(', ')}. Qual categoria da lista é mais apropriada? Responda APENAS o nome da categoria. Se nenhuma, 'Outros'.`;
             const suggested = await callGeminiAPI(prompt);
-            if (suggested && relevantCategories.includes(suggested)) { setCategory(suggested); }
-            else if (suggested) {
-                const matchedCategory = relevantCategories.find(c => c.toLowerCase() === suggested.toLowerCase());
-                if (matchedCategory) { setCategory(matchedCategory); }
-                else { setCategory('Outros'); setSuggestionError(`Sugestão "${suggested}" inválida. Usando 'Outros'.`); }
-            } else { setSuggestionError("Não foi possível sugerir."); setCategory('Outros'); }
+            if (suggested && relevantCategories.some(c => c.toLowerCase() === suggested.toLowerCase())) {
+                const matched = relevantCategories.find(c => c.toLowerCase() === suggested.toLowerCase());
+                setCategory(matched);
+            } else { setSuggestionError(`Sugestão "${suggested}" inválida. Usando 'Outros'.`); setCategory('Outros'); }
         } catch (error) { setSuggestionError(`Falha: ${error.message}.`); setCategory('Outros'); }
         finally { setIsSuggestingCategory(false); }
     };
@@ -290,7 +316,9 @@ const TransactionForm = ({ isOpen, onClose, onSave, editingTransaction, currentM
         onClose();
     };
 
-    const categoriesToShow = type === TRANSACTION_TYPES.INCOME ? CATEGORIES.INCOME : CATEGORIES.EXPENSE;
+    // Merge default + custom categories for expense type
+    const mergedExpenseCategories = [...CATEGORIES.EXPENSE, ...customExpenseCategories.filter(c => !CATEGORIES.EXPENSE.includes(c))];
+    const categoriesToShow = type === TRANSACTION_TYPES.INCOME ? CATEGORIES.INCOME : mergedExpenseCategories;
 
     // Desabilita campos chave na edição de parcelamentos para evitar complexidade
     const isTypeDisabled = isEditingInstallment;
@@ -320,7 +348,23 @@ const TransactionForm = ({ isOpen, onClose, onSave, editingTransaction, currentM
                             {isSuggestingCategory ? (<><Loader2 size={14} className="mr-1 animate-spin" /> Sugerindo...</>) : (<><Zap size={14} className="mr-1" /> ✨ Sugerir</>)}
                         </button>
                     </div>
-                    <select id="category-transaction-form" value={category} onChange={(e) => setCategory(e.target.value)} required className="mt-1 w-full p-3 bg-slate-700 rounded-lg dark:bg-gray-200 dark:text-slate-900"><option value="">Selecione</option>{categoriesToShow.map(cat => <option key={cat} value={cat}>{cat}</option>)}</select>{suggestionError && <p className="text-red-400 text-xs mt-1">{suggestionError}</p>}
+                    <select id="category-transaction-form" value={category} onChange={(e) => setCategory(e.target.value)} required className="mt-1 w-full p-3 bg-slate-700 rounded-lg dark:bg-gray-200 dark:text-slate-900">
+                        <option value="">Selecione</option>
+                        {categoriesToShow.map(cat => <option key={cat} value={cat}>{cat}</option>)}
+                    </select>
+                    {suggestionError && <p className="text-red-400 text-xs mt-1">{suggestionError}</p>}
+                    {/* Inline: Create new category */}
+                    {type === TRANSACTION_TYPES.EXPENSE && (
+                        !showNewCategoryInput ? (
+                            <button type="button" onClick={() => setShowNewCategoryInput(true)} className="mt-1 text-xs text-cyan-400 hover:text-cyan-200 underline underline-offset-2">+ Nova categoria personalizada</button>
+                        ) : (
+                            <div className="flex gap-2 mt-1">
+                                <input type="text" placeholder="Nome da categoria (ex: Pets)" value={newCategoryName} onChange={(e) => setNewCategoryName(e.target.value)} className="flex-1 p-2 bg-slate-700 rounded-lg text-sm text-slate-200" />
+                                <button type="button" onClick={handleCreateCategory} className="px-3 py-2 bg-cyan-600 hover:bg-cyan-500 text-white text-xs rounded-lg">Criar</button>
+                                <button type="button" onClick={() => setShowNewCategoryInput(false)} className="px-3 py-2 bg-slate-600 text-white text-xs rounded-lg">✕</button>
+                            </div>
+                        )
+                    )}
                 </div>
 
                 {/* Credit Card Toggle */}
@@ -614,8 +658,21 @@ const BudgetSection = ({ userId, transactions, currentMonth }) => {
     const [saving, setSaving] = useState(false);
     const [saved, setSaved] = useState(false);
     const [error, setError] = useState('');
+    const [customCategories, setCustomCategories] = useState([]);
 
     const budgetPath = `artifacts/${appId}/users/${userId}/settings`;
+    const categoriesPath = `artifacts/${appId}/users/${userId}/categories`;
+
+    // Load custom categories
+    useEffect(() => {
+        if (!userId) return;
+        const q = query(collection(db, categoriesPath), orderBy('name'));
+        const unsub = onSnapshot(q, (snap) => {
+            const names = snap.docs.map(d => d.data().name).filter(Boolean);
+            setCustomCategories(names);
+        });
+        return () => unsub();
+    }, [userId, categoriesPath]);
 
     // Load existing budget from Firestore
     useEffect(() => {
@@ -718,7 +775,7 @@ const BudgetSection = ({ userId, transactions, currentMonth }) => {
                     as porcentagens e enviar alertas personalizados.
                 </p>
                 <div className="space-y-5">
-                    {EXPENSE_CATEGORIES.map(cat => {
+                    {[...new Set([...EXPENSE_CATEGORIES, ...customCategories, ...Object.keys(draftLimits)])].sort().map(cat => {
                         const limit = parseFloat(draftLimits[cat]) || 0;
                         const spent = monthlySpend[cat] || 0;
                         const pct = limit > 0 ? Math.min((spent / limit) * 100, 100) : 0;

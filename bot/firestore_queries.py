@@ -208,6 +208,45 @@ def create_card(db, app_id: str, user_id: str, name: str) -> str:
         return ""
 
 
+# Default expense categories (base list)
+DEFAULT_CATEGORIES = [
+    'Moradia', 'Alimentação', 'Transporte', 'Lazer', 'Saúde',
+    'Educação', 'Compras', 'Impostos', 'Serviços', 'Dívidas', 'Outros'
+]
+
+
+def get_user_categories(db, app_id: str, user_id: str) -> list:
+    """
+    Returns the full list of expense categories for the user.
+    Merges the default list with any custom categories stored in Firestore.
+    Custom categories are stored in artifacts/{app_id}/users/{user_id}/categories.
+    """
+    try:
+        col = db.collection(f"artifacts/{app_id}/users/{user_id}/categories")
+        docs = col.order_by("name").stream()
+        custom = [d.to_dict().get("name", "") for d in docs if d.to_dict().get("name")]
+        # Merge: default first, then custom ones not already present
+        merged = list(DEFAULT_CATEGORIES)
+        for c in custom:
+            if c not in merged:
+                merged.append(c)
+        return merged
+    except Exception as e:
+        logger.error(f"get_user_categories error: {e}")
+        return list(DEFAULT_CATEGORIES)
+
+
+def create_category(db, app_id: str, user_id: str, name: str) -> bool:
+    """Creates a custom category for the user. Returns True on success."""
+    try:
+        col = db.collection(f"artifacts/{app_id}/users/{user_id}/categories")
+        col.add({"name": name.strip(), "createdAt": firestore.SERVER_TIMESTAMP})
+        return True
+    except Exception as e:
+        logger.error(f"create_category error: {e}")
+        return False
+
+
 def save_income(db, app_id: str, user_id: str, data: dict) -> bool:
     """Saves an income transaction to Firestore."""
     try:
@@ -264,8 +303,8 @@ def save_installment_purchase(db, app_id: str, user_id: str, data: dict,
         import dateutil.relativedelta as rdelta
 
         purchase_dt = datetime.datetime.fromisoformat(data["date"]).replace(hour=12, minute=0, second=0)
-        amount_per = float(data["amount"])
-        total_amount = amount_per * num_installments
+        total_amount = float(data["amount"])
+        amount_per = total_amount / num_installments
         description = data["description"]
         category = data.get("category", "Outros")
 
@@ -288,7 +327,7 @@ def save_installment_purchase(db, app_id: str, user_id: str, data: dict,
         parent_id = parent_ref[1].id
 
         # 2. Child docs (one per installment)
-        payments_col = db.collection(f"artifacts/{app_id}/users/{user_id}/installmentPayments")
+        payments_col = db.collection(f"artifacts/{app_id}/users/{user_id}/installment_payments")
         for i in range(num_installments):
             due_dt = purchase_dt + rdelta.relativedelta(months=i)
             payment_data = {
