@@ -30,7 +30,6 @@ def query_expenses_by_period(db, app_id: str, user_id: str,
                               category: str = None) -> list[dict]:
     """
     Returns a list of expense dicts within the given datetime range.
-    Optionally filtered by category.
     Includes both one-off transactions and installment payments.
     """
     all_expenses = []
@@ -41,15 +40,22 @@ def query_expenses_by_period(db, app_id: str, user_id: str,
             collection_path = f"artifacts/{app_id}/users/{user_id}/{coll}"
             query_ref = (
                 db.collection(collection_path)
-                .where("type", "==", "expense")
                 .where("date", ">=", start_dt)
                 .where("date", "<=", end_dt)
             )
             if category:
                 query_ref = query_ref.where("category", "==", category)
 
-            docs = query_ref.stream()
-            all_expenses.extend([doc.to_dict() for doc in docs])
+            docs = list(query_ref.stream())
+            found_count = 0
+            for d in docs:
+                data = d.to_dict()
+                if data.get("type") == "expense":
+                    all_expenses.append(data)
+                    found_count += 1
+            
+            logger.info(f"Sofia Query: {coll} found {len(docs)} total docs, {found_count} were expenses.")
+                    
         except Exception as e:
             logger.error(f"query_expenses_by_period error in collection {coll}: {e}")
             
