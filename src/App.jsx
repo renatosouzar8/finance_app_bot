@@ -445,7 +445,7 @@ const TransactionItem = ({ transaction, onEdit, onDelete, onTogglePaid }) => {
     );
 };
 
-const InstallmentsReport = ({ userId, onEdit, onDelete, showAll = false }) => {
+const InstallmentsReport = ({ userId, currentMonth, onEdit, onDelete, showAll = false }) => {
     const [installments, setInstallments] = useState([]);
     const [installmentPayments, setInstallmentPayments] = useState([]);
     const [showFinished, setShowFinished] = useState(false);
@@ -477,10 +477,26 @@ const InstallmentsReport = ({ userId, onEdit, onDelete, showAll = false }) => {
     };
 
     if (loading && installments.length === 0) return <div className="text-center p-4 text-slate-400 dark:text-gray-500">Carregando...</div>;
+
+    const currentMonthTotal = installmentPayments
+        .filter(p => {
+            const d = p.dueDate?.toDate ? p.dueDate.toDate() : null;
+            return d && currentMonth && isSameMonth(d, currentMonth);
+        })
+        .reduce((sum, p) => sum + (p.amount || 0), 0);
+
     return (
         <div className="bg-slate-800 dark:bg-white p-6 rounded-xl shadow-lg">
             <div className="flex justify-between items-center mb-6">
-                <h3 className="text-2xl font-semibold text-violet-400 dark:text-violet-700">Relatório de Compras Parceladas</h3>
+                <div className="flex items-center gap-3">
+                    <h3 className="text-2xl font-semibold text-violet-400 dark:text-violet-700">Relatório de Compras Parceladas</h3>
+                    {currentMonth && (
+                        <div className="bg-slate-700/50 dark:bg-gray-100 px-3 py-1 rounded-lg border border-slate-600/50">
+                            <span className="text-sm text-slate-300 dark:text-slate-600">Total do Mês: </span>
+                            <span className="text-sm font-bold text-violet-400 dark:text-violet-600">R$ {currentMonthTotal.toFixed(2)}</span>
+                        </div>
+                    )}
+                </div>
                 <div className="flex items-center space-x-2">
                     <label htmlFor="show-finished-toggle" className="text-sm text-slate-400 dark:text-gray-500 cursor-pointer">Mostrar Quitados</label>
                     <button
@@ -1049,13 +1065,16 @@ const Dashboard = ({ user, handleLogout, theme, toggleTheme, isTelegramModalOpen
 
             } else { // Nova transação
                 if (transactionData.isInstallment) { // Nova compra parcelada (mãe)
+                    const totalAmt = transactionData.amount;
+                    const valPerInst = totalAmt / transactionData.numberOfInstallments;
+
                     const installmentParentData = {
                         userId, description: transactionData.description,
-                        totalAmount: transactionData.amount * transactionData.numberOfInstallments,
+                        totalAmount: totalAmt,
                         purchaseDate: transactionData.date,
                         numberOfInstallments: transactionData.numberOfInstallments,
                         category: transactionData.category, createdAt: Timestamp.now(),
-                        valuePerInstallment: transactionData.amount,
+                        valuePerInstallment: valPerInst,
                         isInstallmentOriginal: true
                     };
                     const installmentParentRef = await addDoc(collection(db, installmentsPath), installmentParentData);
@@ -1065,7 +1084,7 @@ const Dashboard = ({ user, handleLogout, theme, toggleTheme, isTelegramModalOpen
                         await addDoc(collection(db, installmentPaymentsPath), {
                             userId, installmentId: installmentParentRef.id,
                             paymentNumber: i + 1, totalInstallments: transactionData.numberOfInstallments,
-                            amount: transactionData.amount, // amount é o valor da parcela
+                            amount: valPerInst, // amount é o valor da parcela
                             dueDate: Timestamp.fromDate(dueDate), isPaid: false,
                             date: Timestamp.fromDate(dueDate), type: TRANSACTION_TYPES.EXPENSE,
                         });
@@ -1316,7 +1335,7 @@ const Dashboard = ({ user, handleLogout, theme, toggleTheme, isTelegramModalOpen
 
                 {activeTab === 'installments' && (
                     <div className="space-y-6 animate-fade-in-up">
-                        <InstallmentsReport userId={userId} showAll={true} onEdit={handleEditTransaction} onDelete={handleDeleteTransaction} />
+                        <InstallmentsReport userId={userId} currentMonth={currentMonth} showAll={true} onEdit={handleEditTransaction} onDelete={handleDeleteTransaction} />
                     </div>
                 )}
 
