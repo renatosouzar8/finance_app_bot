@@ -203,47 +203,82 @@ class Sofia:
         totals = get_monthly_totals_by_category(
             self.db, self.app_id, self.user_id, today.year, today.month
         )
-        total = sum(totals.values())
+        total_spent = sum(totals.values())
         days_in_month = calendar.monthrange(today.year, today.month)[1]
         days_remaining = days_in_month - today.day
-        daily_avg = total / today.day if today.day > 0 else 0
-        projection = daily_avg * days_in_month
 
         limits = self._get_category_limits()
         monthly_income = get_monthly_income(self.db, self.app_id, self.user_id)
+        total_planned = sum(limits.values()) if limits else 0
 
+        # Build category lines showing spent vs planned
         lines = []
+        over_budget_cats = []
         for cat, val in sorted(totals.items(), key=lambda x: -x[1]):
             emoji = CATEGORY_EMOJI.get(cat, "•")
             lim = limits.get(cat)
-            pct_str = f" ({int(val/lim*100)}% do planejado)" if lim else ""
+            if lim:
+                pct = int(val / lim * 100)
+                pct_str = f" ({pct}% do planejado)"
+                if val > lim:
+                    over_budget_cats.append(cat)
+            else:
+                pct_str = ""
             lines.append(f"{emoji} {cat}: R${val:.2f}".replace(".", ",") + pct_str)
 
         breakdown = "\n".join(lines) if lines else "Nenhum gasto registrado ainda."
         month_name = calendar.month_name[today.month]
-        income_ctx = f"Receita do mês (transações): R${monthly_income:.2f}.\n" if monthly_income > 0 else ""
-        pct_income_str = f" ({int(total/monthly_income*100)}% da receita)" if monthly_income > 0 else ""
+
+        # Budget remaining context
+        budget_remaining = total_planned - total_spent if total_planned > 0 else None
+        income_pct = int(total_spent / monthly_income * 100) if monthly_income > 0 else None
+
+        # Prompt for Gemini — no projection, only budget-based analysis
+        income_line = f"Receita do mês: R${monthly_income:.2f}.\n" if monthly_income > 0 else ""
+        planned_line = f"Total planejado (orçamento): R${total_planned:.2f}.\n" if total_planned > 0 else ""
+        remaining_line = (
+            f"Saldo do orçamento: R${budget_remaining:.2f} ainda disponível.\n"
+            if budget_remaining is not None and budget_remaining >= 0
+            else (f"Orçamento excedido em R${abs(budget_remaining):.2f}.\n"
+                  if budget_remaining is not None else "")
+        )
+        income_pct_line = f"Percentual da receita gasto: {income_pct}%.\n" if income_pct is not None else ""
+        over_line = f"Categorias acima do planejado: {', '.join(over_budget_cats)}.\n" if over_budget_cats else ""
 
         context_prompt = (
-            f"Resumo de {month_name} até o dia {today.day}:\n"
-            f"{income_ctx}"
-            f"Total gasto: R${total:.2f}{pct_income_str}\n"
-            f"Projeção para o mês: R${projection:.2f}\n"
-            f"Dias restantes: {days_remaining}\n"
-            f"Detalhes:\n{chr(10).join(lines)}\n\n"
-            "Escreva 1 frase de análise: se está no controle, no limite ou acima. "
-            "Inclua 1 sugestão prática se aplicável. Seja breve."
+            f"Resumo financeiro de {month_name} (dia {today.day}/{days_in_month}):\n"
+            f"{income_line}"
+            f"{planned_line}"
+            f"Total gasto até agora: R${total_spent:.2f}.\n"
+            f"{remaining_line}"
+            f"{income_pct_line}"
+            f"{over_line}"
+            f"Faltam {days_remaining} dias no mês.\n"
+            f"Detalhes por categoria:\n{chr(10).join(lines)}\n\n"
+            "Com base nesses dados (sem inventar projeções), escreva 1-2 frases de análise: "
+            "se o usuário está dentro do orçamento planejado, próximo do limite ou acima. "
+            "Se houver categoria acima do limite, mencione. "
+            "Inclua 1 sugestão prática e objetiva. Sofia: empática, direta, sem drama."
         )
         insight = self._call_gemini(context_prompt)
 
-        total_fmt = f"R${total:.2f}".replace(".", ",")
-        proj_fmt = f"R${projection:.2f}".replace(".", ",")
+        # Format the message — no projection line
+        total_fmt = f"R${total_spent:.2f}".replace(".", ",")
+        planned_fmt = f"R${total_planned:.2f}".replace(".", ",") if total_planned > 0 else None
+        income_fmt = f"R${monthly_income:.2f}".replace(".", ",") if monthly_income > 0 else None
+
+        summary_line = f"Total gasto: {total_fmt}"
+        if planned_fmt:
+            summary_line += f" / Planejado: {planned_fmt}"
+        if income_fmt:
+            pct_str = f" ({income_pct}% da receita)" if income_pct else ""
+            summary_line += f"\nReceita: {income_fmt}{pct_str}"
 
         msg = (
             f"📊 {month_name} até agora:\n\n"
             f"{breakdown}\n\n"
             f"──────\n"
-            f"Total: {total_fmt} | Projeção: {proj_fmt}\n"
+            f"{summary_line}\n"
             f"Faltam {days_remaining} dias"
         )
         if insight:
