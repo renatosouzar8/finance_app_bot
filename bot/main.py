@@ -11,7 +11,11 @@ from google import genai
 from google.genai import types
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters, CallbackQueryHandler
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 from keep_alive import keep_alive
+from analyst import Sofia, CATEGORY_EMOJI
+from firestore_queries import get_monthly_totals_by_category
 
 # Load environment variables
 load_dotenv()
@@ -39,6 +43,8 @@ if not firebase_admin._apps:
 
 db = firestore.client()
 
+logger = logging.getLogger(__name__)
+
 # Gemini Setup
 client = genai.Client(api_key=GEMINI_API_KEY)
 
@@ -47,6 +53,22 @@ CATEGORIES = [
     'Moradia', 'Alimentação', 'Transporte', 'Lazer', 'Saúde', 
     'Educação', 'Compras', 'Impostos', 'Serviços', 'Dívidas', 'Outros'
 ]
+
+async def get_all_mapped_users() -> list[dict]:
+    """Returns all {telegram_id, firebase_uid} pairs for proactive messages."""
+    try:
+        docs = db.collection(f"artifacts/{APP_ID}/user_mappings").stream()
+        return [
+            {
+                "telegram_id": d.to_dict().get("telegramId"),
+                "firebase_uid": d.to_dict().get("firebaseUserId"),
+            }
+            for d in docs
+        ]
+    except Exception as e:
+        logger.error(f"get_all_mapped_users error: {e}")
+        return []
+
 
 async def get_firebase_user_id(telegram_id):
     """Downloads the mapping from Firestore."""
@@ -112,7 +134,13 @@ async def process_with_gemini(text=None, audio_file=None):
         "end_date": <ISO date string YYYY-MM-DD>
     }}
     
-    ### Scenario 3: Fallback / More Details
+    ### Scenario 3: Monthly Summary
+    If the user asks "resumo do mês", "como estou", "relatório", "situação dos gastos", "quanto gastei esse mês", return:
+    {{
+        "intent": "SUMMARY_MONTH"
+    }}
+
+    ### Scenario 4: Fallback / More Details
     If the user asks something unrelated to finance, OR asks for complex charts/visuals, OR wants to see the dashboard, return:
     {{
         "intent": "FALLBACK"
@@ -253,7 +281,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
     
     extracted = await process_with_gemini(text=user_text)
-    await respond_to_user(update, extracted, firebase_uid)
+    await respond_to_user(update, context, extracted, firebase_uid)
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
@@ -271,9 +299,9 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await voice_file.download_to_drive(file_path)
     
     extracted = await process_with_gemini(audio_file=file_path)
-    
+
     # Respond first to ensure user gets feedback
-    await respond_to_user(update, extracted, firebase_uid)
+    await respond_to_user(update, context, extracted, firebase_uid)
     
     # Cleanup afterwards
     try:
@@ -283,7 +311,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.warning(f"Failed to delete temp file {file_path}: {e}")
 
-async def respond_to_user(update, extracted, firebase_uid):
+async def respond_to_user(update, context, extracted, firebase_uid):
     if not extracted:
         await update.message.reply_text("Desculpe, não entendi. Tente de novo.")
         return
@@ -292,62 +320,144 @@ async def respond_to_user(update, extracted, firebase_uid):
         await update.message.reply_text(f"❌ Erro no Gemini: {extracted['error']}")
         return
 
-    # Check for FALLBACK intent
-    if extracted.get('intent') == 'FALLBACK':
-        await update.message.reply_text("📱 Para estas informações e muito mais, acesse o app completo: https://my-finance-app-24d0f.web.app")
+    intent = extracted.get("intent")
+
+    if intent == "FALLBACK":
+        await update.message.reply_text(
+            "📱 Para estas informações e muito mais, acesse o app completo: https://my-finance-app-24d0f.web.app"
+        )
         return
 
-    if extracted.get('intent') == 'REGISTER':
-        print("DEBUG: Processing REGISTER intent")
+    if intent == "REGISTER":
         success = await save_expense(extracted, firebase_uid)
-        print(f"DEBUG: save_expense returned {success}")
-        if success:
-            formatted_amount = f"{extracted['amount']:.2f}".replace('.', ',')
-            msg = f"✅ Registrado: R$ {formatted_amount} em {extracted['category']} ({extracted['description']})."
-        else:
-            msg = "❌ Erro ao salvar no banco de dados."
-        await update.message.reply_text(msg)
-        
-    elif extracted.get('intent') == 'QUERY':
-        total, count = await query_expenses(extracted, firebase_uid)
-        if total is not None:
-            cat_text = f" em {extracted['category']}" if extracted.get('category') else ""
-            
-            # Date Formatting Logic
-            start = extracted['start_date']
-            end = extracted['end_date']
-            today = datetime.date.today().isoformat()
-            yesterday = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
-            
-            if start == end:
-                if start == today:
-                    date_text = "hoje"
-                elif start == yesterday:
-                    date_text = "ontem"
-                else:
-                    # Format YYYY-MM-DD to DD/MM
-                    d_obj = datetime.datetime.strptime(start, "%Y-%m-%d")
-                    date_text = f"em {d_obj.strftime('%d/%m')}"
-            else:
-                s_obj = datetime.datetime.strptime(start, "%Y-%m-%d")
-                e_obj = datetime.datetime.strptime(end, "%Y-%m-%d")
-                date_text = f"de {s_obj.strftime('%d/%m')} até {e_obj.strftime('%d/%m')}"
+        if not success:
+            await update.message.reply_text("❌ Erro ao salvar no banco de dados.")
+            return
 
-            formatted_total = f"{total:.2f}".replace('.', ',')
-            
-            response_msg = (
-                f"📊 Total gasto{cat_text} {date_text}: R$ {formatted_total} ({count} transações).\n\n"
-                f"📱 Para ver detalhes das transações, acesse o app: https://my-finance-app-24d0f.web.app"
+        amount = float(extracted["amount"])
+        category = extracted["category"]
+        formatted_amount = f"{amount:.2f}".replace(".", ",")
+        await update.message.reply_text(
+            f"✅ Registrado: R$ {formatted_amount} em {category} ({extracted['description']})."
+        )
+
+        sofia = Sofia(db, APP_ID, client, firebase_uid)
+        alert = await sofia.check_after_register(amount, category)
+        if alert:
+            await update.message.reply_text(alert)
+        return
+
+    if intent == "QUERY":
+        sofia = Sofia(db, APP_ID, client, firebase_uid)
+        msg = await sofia.build_query_response(
+            extracted["start_date"],
+            extracted["end_date"],
+            extracted.get("category"),
+        )
+        await update.message.reply_text(msg)
+        return
+
+    if intent == "SUMMARY_MONTH":
+        sofia = Sofia(db, APP_ID, client, firebase_uid)
+        msg = await sofia.build_monthly_summary()
+        await update.message.reply_text(msg)
+        return
+
+    await update.message.reply_text("Não entendi se é para registrar ou consultar. Tente ser mais claro.")
+
+# ── Proactive scheduler ───────────────────────────────────────────────────────
+
+async def job_weekly_summary(bot):
+    users = await get_all_mapped_users()
+    for user in users:
+        try:
+            tid, fuid = user["telegram_id"], user["firebase_uid"]
+            if not tid or not fuid:
+                continue
+            sofia = Sofia(db, APP_ID, client, fuid)
+            if not sofia._can_send_proactive():
+                continue
+            msg = await sofia.build_weekly_summary()
+            await bot.send_message(chat_id=tid, text=msg)
+            sofia._mark_proactive_sent()
+        except Exception as e:
+            logger.error(f"Weekly summary error for {user}: {e}")
+
+
+async def job_monthly_closure(bot):
+    import calendar
+    users = await get_all_mapped_users()
+    for user in users:
+        try:
+            tid, fuid = user["telegram_id"], user["firebase_uid"]
+            if not tid or not fuid:
+                continue
+            sofia = Sofia(db, APP_ID, client, fuid)
+            if not sofia._can_send_proactive():
+                continue
+            today = datetime.date.today()
+            prev_month = today.month - 1 if today.month > 1 else 12
+            prev_year = today.year if today.month > 1 else today.year - 1
+            totals = get_monthly_totals_by_category(db, APP_ID, fuid, prev_year, prev_month)
+            total = sum(totals.values())
+            month_name = calendar.month_name[prev_month]
+            lines = [
+                f"{CATEGORY_EMOJI.get(cat, '•')} {cat}: R${val:.2f}".replace(".", ",")
+                for cat, val in sorted(totals.items(), key=lambda x: -x[1])
+            ]
+            breakdown = "\n".join(lines) or "Nenhum gasto registrado."
+            msg = (
+                f"📊 Fechamento de {month_name}\n\n{breakdown}\n\n──────\n"
+                f"Total: R${total:.2f}".replace(".", ",") +
+                "\n\nQuer revisar metas para este mês?"
             )
-            await update.message.reply_text(response_msg)
-        else:
-            await update.message.reply_text("❌ Erro ao consultar gastos.")
-    
-    else:
-        await update.message.reply_text("Não entendi se é para registrar ou consultar. Tente ser mais claro.")
+            await bot.send_message(chat_id=tid, text=msg)
+            sofia._mark_proactive_sent()
+        except Exception as e:
+            logger.error(f"Monthly closure error for {user}: {e}")
+
+
+async def job_biweekly_checkin(bot):
+    import calendar
+    users = await get_all_mapped_users()
+    for user in users:
+        try:
+            tid, fuid = user["telegram_id"], user["firebase_uid"]
+            if not tid or not fuid:
+                continue
+            sofia = Sofia(db, APP_ID, client, fuid)
+            if not sofia._can_send_proactive():
+                continue
+            today = datetime.date.today()
+            month_name = calendar.month_name[today.month]
+            summary = await sofia.build_monthly_summary()
+            await bot.send_message(chat_id=tid, text=f"📍 Metade de {month_name}.\n\n{summary}")
+            sofia._mark_proactive_sent()
+        except Exception as e:
+            logger.error(f"Biweekly check-in error for {user}: {e}")
+
+
+def setup_scheduler(app) -> AsyncIOScheduler:
+    scheduler = AsyncIOScheduler(timezone="America/Sao_Paulo")
+    scheduler.add_job(
+        job_weekly_summary,
+        trigger=CronTrigger(day_of_week="sun", hour=20, minute=0, timezone="America/Sao_Paulo"),
+        args=[app.bot], id="weekly_summary", replace_existing=True,
+    )
+    scheduler.add_job(
+        job_monthly_closure,
+        trigger=CronTrigger(day=1, hour=9, minute=0, timezone="America/Sao_Paulo"),
+        args=[app.bot], id="monthly_closure", replace_existing=True,
+    )
+    scheduler.add_job(
+        job_biweekly_checkin,
+        trigger=CronTrigger(day=15, hour=9, minute=0, timezone="America/Sao_Paulo"),
+        args=[app.bot], id="biweekly_checkin", replace_existing=True,
+    )
+    return scheduler
+
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Log the error and send a telegram message to notify the developer."""
     logging.error(msg="Exception while handling an update:", exc_info=context.error)
 
 if __name__ == '__main__':
@@ -368,7 +478,10 @@ if __name__ == '__main__':
     application.add_error_handler(error_handler)
     
     
-    print(f"Bot Version: 1.1")
+    scheduler = setup_scheduler(application)
+    scheduler.start()
+
+    print(f"Bot Version: 2.0 (Sofia enabled)")
     print(f"Bot is running in MULTI-USER mode (APP_ID: {APP_ID})...")
     keep_alive()
     application.run_polling()
