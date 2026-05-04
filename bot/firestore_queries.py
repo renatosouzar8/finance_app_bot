@@ -52,6 +52,9 @@ def query_expenses_by_period(db, app_id: str, user_id: str,
             else:
                 docs = list(db.collection(collection_path).where("date", ">=", start_dt).where("date", "<=", end_dt).stream())
             
+            # Cache for parent installment documents to avoid repeated reads
+            parent_cache = {}
+            
             found_count = 0
             for d in docs:
                 data = d.to_dict()
@@ -77,6 +80,23 @@ def query_expenses_by_period(db, app_id: str, user_id: str,
                     it_date_naive = item_date.replace(tzinfo=None)
                     if not (start_dt <= it_date_naive <= end_dt):
                         continue
+                        
+                # Fix for Web App legacy data:
+                # The Web App doesn't save category/description in the child document, only in the parent.
+                # If category is missing, we must fetch the parent document.
+                if coll == "installment_payments" and not data.get("category"):
+                    parent_id = data.get("installmentId")
+                    if parent_id:
+                        if parent_id not in parent_cache:
+                            parent_doc = db.collection(f"artifacts/{app_id}/users/{user_id}/installments").document(parent_id).get()
+                            if parent_doc.exists:
+                                parent_cache[parent_id] = parent_doc.to_dict()
+                            else:
+                                parent_cache[parent_id] = {}
+                        
+                        parent_data = parent_cache[parent_id]
+                        data["category"] = parent_data.get("category", "Outros")
+                        data["description"] = parent_data.get("description", "Parcela")
 
                 # Manual filtering in Python
                 item_type = str(data.get("type", "")).strip().lower()
