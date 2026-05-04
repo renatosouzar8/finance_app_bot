@@ -43,6 +43,7 @@ def query_expenses_by_period(db, app_id: str, user_id: str,
     for coll in collections_to_query:
         try:
             collection_path = f"artifacts/{app_id}/users/{user_id}/{coll}"
+            logger.info(f"Sofia Querying path: {collection_path}")
             # Fetch EVERYTHING in the date range to be 100% sure we don't miss anything due to indexing
             query_ref = db.collection(collection_path).where("date", ">=", start_dt).where("date", "<=", end_dt)
             
