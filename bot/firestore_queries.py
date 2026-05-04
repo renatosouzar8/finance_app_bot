@@ -186,3 +186,130 @@ def get_monthly_income(db, app_id: str, user_id: str,
         logger.error(f"get_monthly_income error: {e}")
         return 0.0
 
+def get_user_cards(db, app_id: str, user_id: str) -> list:
+    """Returns list of {'id': doc_id, 'name': str} for user's credit cards."""
+    try:
+        col = db.collection(f"artifacts/{app_id}/users/{user_id}/cards")
+        docs = col.order_by("name").stream()
+        return [{"id": d.id, **d.to_dict()} for d in docs]
+    except Exception as e:
+        logger.error(f"get_user_cards error: {e}")
+        return []
+
+
+def create_card(db, app_id: str, user_id: str, name: str) -> str:
+    """Creates a new credit card and returns its Firestore document ID."""
+    try:
+        col = db.collection(f"artifacts/{app_id}/users/{user_id}/cards")
+        ref = col.add({"name": name.strip(), "createdAt": firestore.SERVER_TIMESTAMP})
+        return ref[1].id
+    except Exception as e:
+        logger.error(f"create_card error: {e}")
+        return ""
+
+
+def save_income(db, app_id: str, user_id: str, data: dict) -> bool:
+    """Saves an income transaction to Firestore."""
+    try:
+        col = db.collection(f"artifacts/{app_id}/users/{user_id}/transactions")
+        col.add({
+            "description": data["description"],
+            "amount": float(data["amount"]),
+            "category": data.get("category", "Outros"),
+            "type": "income",
+            "date": datetime.datetime.fromisoformat(data["date"]).replace(hour=12, minute=0, second=0),
+            "createdAt": firestore.SERVER_TIMESTAMP,
+            "userId": user_id,
+            "isInstallmentOriginal": False,
+        })
+        return True
+    except Exception as e:
+        logger.error(f"save_income error: {e}")
+        return False
+
+
+def save_expense_with_card(db, app_id: str, user_id: str, data: dict,
+                            credit_card_id: str = None) -> bool:
+    """Saves a simple (non-installment) expense, optionally linked to a credit card."""
+    try:
+        col = db.collection(f"artifacts/{app_id}/users/{user_id}/transactions")
+        doc_data = {
+            "description": data["description"],
+            "amount": float(data["amount"]),
+            "category": data.get("category", "Outros"),
+            "type": "expense",
+            "date": datetime.datetime.fromisoformat(data["date"]).replace(hour=12, minute=0, second=0),
+            "createdAt": firestore.SERVER_TIMESTAMP,
+            "userId": user_id,
+            "isInstallmentOriginal": False,
+        }
+        if credit_card_id:
+            doc_data["creditCardId"] = credit_card_id
+        col.add(doc_data)
+        return True
+    except Exception as e:
+        logger.error(f"save_expense_with_card error: {e}")
+        return False
+
+
+def save_installment_purchase(db, app_id: str, user_id: str, data: dict,
+                               num_installments: int,
+                               credit_card_id: str = None) -> bool:
+    """
+    Replicates the App Web installment logic:
+    - Creates 1 parent doc in installments/
+    - Creates N child docs in installmentPayments/ (one per month from purchase date)
+    """
+    try:
+        import dateutil.relativedelta as rdelta
+
+        purchase_dt = datetime.datetime.fromisoformat(data["date"]).replace(hour=12, minute=0, second=0)
+        amount_per = float(data["amount"])
+        total_amount = amount_per * num_installments
+        description = data["description"]
+        category = data.get("category", "Outros")
+
+        # 1. Parent doc
+        installments_col = db.collection(f"artifacts/{app_id}/users/{user_id}/installments")
+        parent_data = {
+            "userId": user_id,
+            "description": description,
+            "totalAmount": total_amount,
+            "valuePerInstallment": amount_per,
+            "numberOfInstallments": num_installments,
+            "purchaseDate": purchase_dt,
+            "category": category,
+            "isInstallmentOriginal": True,
+            "createdAt": firestore.SERVER_TIMESTAMP,
+        }
+        if credit_card_id:
+            parent_data["creditCardId"] = credit_card_id
+        parent_ref = installments_col.add(parent_data)
+        parent_id = parent_ref[1].id
+
+        # 2. Child docs (one per installment)
+        payments_col = db.collection(f"artifacts/{app_id}/users/{user_id}/installmentPayments")
+        for i in range(num_installments):
+            due_dt = purchase_dt + rdelta.relativedelta(months=i)
+            payment_data = {
+                "userId": user_id,
+                "installmentId": parent_id,
+                "description": description,
+                "category": category,
+                "type": "expense",
+                "amount": amount_per,
+                "date": due_dt,
+                "dueDate": due_dt,
+                "paymentNumber": i + 1,
+                "totalInstallments": num_installments,
+                "isPaid": False,
+                "createdAt": firestore.SERVER_TIMESTAMP,
+            }
+            if credit_card_id:
+                payment_data["creditCardId"] = credit_card_id
+            payments_col.add(payment_data)
+
+        return True
+    except Exception as e:
+        logger.error(f"save_installment_purchase error: {e}")
+        return False

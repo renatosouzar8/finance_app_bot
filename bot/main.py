@@ -11,12 +11,24 @@ from firebase_admin import firestore
 from google import genai
 from google.genai import types
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters, CallbackQueryHandler
+from telegram.ext import (ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler,
+                          filters, CallbackQueryHandler, ConversationHandler)
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from keep_alive import keep_alive
 from analyst import Sofia, CATEGORY_EMOJI
-from firestore_queries import get_monthly_totals_by_category
+from firestore_queries import (
+    get_monthly_totals_by_category,
+    get_user_cards,
+    create_card,
+    save_income,
+    save_expense_with_card,
+    save_installment_purchase,
+)
+
+# ── Conversation states ────────────────────────────────────────────────────────
+ASK_CARD, ASK_WHICH_CARD, ASK_NEW_CARD_NAME, ASK_INSTALLMENT, ASK_NUM_INSTALLMENTS = range(5)
+CONV_TIMEOUT = 300  # 5 minutes
 
 # Load environment variables
 load_dotenv()
@@ -51,9 +63,10 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 
 # Categories (matching frontend)
 CATEGORIES = [
-    'Moradia', 'Alimentação', 'Transporte', 'Lazer', 'Saúde', 
+    'Moradia', 'Alimentação', 'Transporte', 'Lazer', 'Saúde',
     'Educação', 'Compras', 'Impostos', 'Serviços', 'Dívidas', 'Outros'
 ]
+INCOME_CATEGORIES = ['Salário', 'Freelance', 'Investimentos', 'Reembolso', 'Outros']
 
 # Sofia off-topic replies (humorous, in character)
 SOFIA_OFFTOPIC_REPLIES = [
@@ -118,37 +131,39 @@ async def process_with_gemini(text=None, audio_file=None):
     system_prompt = f"""
     You are a strict financial intent classifier for a personal finance bot named Sofia.
     Current Date: {current_date}
-    Available Expense Categories: {', '.join(CATEGORIES)}
+    Expense Categories: {', '.join(CATEGORIES)}
+    Income Categories: {', '.join(INCOME_CATEGORIES)}
 
-    Analyze the user's input (Text or Audio) and classify the intent.
-    Return ONLY a valid JSON object. Do NOT wrap in markdown code blocks.
+    Analyze the user's input and return ONLY a valid JSON object. No markdown.
 
-    ### Scenario 1: Registering an Expense
-    If the user is reporting spending money ("gastei", "paguei", "comprei", "spent", "paid", "bought", etc.) return:
-    {{"intent": "REGISTER", "amount": <number>, "category": <exact category from list or "Outros">, "description": <short text>, "date": <YYYY-MM-DD>}}
+    ### Scenario 1a: Registering an EXPENSE
+    User reports spending money ("gastei", "paguei", "comprei", "spent", "paid", "bought", etc.):
+    {{"intent": "REGISTER_EXPENSE", "amount": <number>, "category": <expense category or "Outros">, "description": <short text>, "date": <YYYY-MM-DD>}}
+
+    ### Scenario 1b: Registering INCOME
+    User reports receiving money ("recebi", "entrou", "salário", "received", "earned", etc.):
+    {{"intent": "REGISTER_INCOME", "amount": <number>, "category": <income category or "Outros">, "description": <short text>, "date": <YYYY-MM-DD>}}
 
     ### Scenario 2: Querying Expenses
-    If the user asks about their past or current spending history, return:
-    {{"intent": "QUERY", "category": <category name or null>, "start_date": <YYYY-MM-DD>, "end_date": <YYYY-MM-DD>}}
+    User asks about past or current spending history:
+    {{"intent": "QUERY", "category": <category or null>, "start_date": <YYYY-MM-DD>, "end_date": <YYYY-MM-DD>}}
 
     ### Scenario 3: Monthly Summary
-    If the user asks for a monthly overview ("resumo", "como estou", "relatório", "quanto gastei esse mês", "situação"), return:
+    User asks for monthly overview ("resumo", "como estou", "relatório", "quanto gastei"):
     {{"intent": "SUMMARY_MONTH"}}
 
-    ### Scenario 4: Off-Topic (NOT related to personal finance at all)
-    If the user asks about programming, recipes, jokes, sports, general knowledge, weather, homework,
-    or ANYTHING that has absolutely no relation to personal finance, spending, or budget, return:
+    ### Scenario 4: Off-Topic
+    Unrelated to personal finance (programming, recipes, sports, weather, etc.):
     {{"intent": "OFFTOPIC"}}
 
     ### Scenario 5: Dashboard / Visuals
-    If the user asks for charts, graphs, or things better seen in the app dashboard, return:
+    User asks for charts, graphs, or dashboard:
     {{"intent": "FALLBACK"}}
 
     Rules:
-    - For "hoje" / "today": start_date and end_date = {current_date}
-    - For "ontem" / "yesterday": both = yesterday's date
-    - When in doubt between QUERY and OFFTOPIC, prefer QUERY if there is ANY financial context.
-    - When in doubt between OFFTOPIC and FALLBACK, use OFFTOPIC for clearly non-financial content.
+    - "hoje"/"today": start_date = end_date = {current_date}
+    - "ontem"/"yesterday": both = yesterday
+    - Prefer QUERY over OFFTOPIC when any financial context exists.
     """
     
     try:
@@ -185,29 +200,8 @@ async def process_with_gemini(text=None, audio_file=None):
         return {"error": str(e)}
 
 async def save_expense(data, user_id):
-    """Saves the expense to Firestore for a specific user."""
-    print(f"DEBUG: Entering save_expense for user {user_id}")
-    try:
-        transaction_data = {
-            "description": data["description"],
-            "amount": float(data["amount"]),
-            "category": data["category"],
-            "type": "expense",
-            # Fix Timezone: Set to Noon (12:00)
-            "date": datetime.datetime.fromisoformat(data["date"]).replace(hour=12, minute=0, second=0),
-            "createdAt": firestore.SERVER_TIMESTAMP,
-            "userId": user_id,
-            "isInstallmentOriginal": False
-        }
-        
-        collection_path = f"artifacts/{APP_ID}/users/{user_id}/transactions"
-        print(f"DEBUG: Saving to {collection_path}")
-        db.collection(collection_path).add(transaction_data)
-        print("DEBUG: Firestore save successful")
-        return True
-    except Exception as e:
-        logging.error(f"Firestore Save Error: {e}")
-        return False
+    """Saves a plain expense to Firestore (legacy, used by scheduler). Use save_expense_with_card for new flows."""
+    return save_expense_with_card(db, APP_ID, user_id, data)
 
 async def query_expenses(filters, user_id):
     """Queries Firestore for a specific user."""
@@ -310,66 +304,248 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.warning(f"Failed to delete temp file {file_path}: {e}")
 
-async def respond_to_user(update, context, extracted, firebase_uid):
-    if not extracted:
-        await update.message.reply_text("Desculpe, não entendi. Tente de novo.")
-        return
+def _expense_confirmation(data: dict) -> str:
+    """Formats a short confirmation line for an expense."""
+    amount = float(data['amount'])
+    return f"✅ Entendido: R$ {amount:.2f} em {data['category']} — {data['description']}".replace(".", ",", 1)
 
-    if extracted.get("error"):
-        await update.message.reply_text(f"❌ Erro no Gemini: {extracted['error']}")
-        return
 
+async def _handle_classify(update: Update, context: ContextTypes.DEFAULT_TYPE, extracted: dict, firebase_uid: str) -> int:
+    """Central dispatcher after Gemini classifies the message. Returns conversation state or ConversationHandler.END."""
     intent = extracted.get("intent")
 
     if intent == "OFFTOPIC":
-        reply = random.choice(SOFIA_OFFTOPIC_REPLIES)
-        await update.message.reply_text(reply)
-        return
+        await update.message.reply_text(random.choice(SOFIA_OFFTOPIC_REPLIES))
+        return ConversationHandler.END
 
     if intent == "FALLBACK":
+        await update.message.reply_text("📱 Para gráficos e informações detalhadas, acesse o app: https://my-finance-app-24d0f.web.app")
+        return ConversationHandler.END
+
+    if intent == "REGISTER_INCOME":
+        ok = save_income(db, APP_ID, firebase_uid, extracted)
+        if ok:
+            amount = float(extracted['amount'])
+            await update.message.reply_text(
+                f"💰 Receita registrada: R$ {amount:.2f} — {extracted['description']} ({extracted.get('category','Outros')})".replace(".", ",", 1)
+            )
+        else:
+            await update.message.reply_text("❌ Erro ao salvar receita. Tente novamente.")
+        return ConversationHandler.END
+
+    if intent == "REGISTER_EXPENSE":
+        # Store parsed data and start multi-step conversation
+        context.user_data["tx"] = extracted
+        context.user_data["firebase_uid"] = firebase_uid
+        keyboard = [
+            [InlineKeyboardButton("💳 Sim, foi no cartão", callback_data="card_yes"),
+             InlineKeyboardButton("💵 Não, à vista", callback_data="card_no")]
+        ]
         await update.message.reply_text(
-            "📱 Para gráficos e informações detalhadas, acesse o app completo: https://my-finance-app-24d0f.web.app"
+            f"{_expense_confirmation(extracted)}\n\n💳 Foi no cartão de crédito?",
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
-        return
-
-    if intent == "REGISTER":
-        success = await save_expense(extracted, firebase_uid)
-        if not success:
-            await update.message.reply_text("❌ Erro ao salvar no banco de dados.")
-            return
-
-        amount = float(extracted["amount"])
-        category = extracted["category"]
-        formatted_amount = f"{amount:.2f}".replace(".", ",")
-        await update.message.reply_text(
-            f"✅ Registrado: R$ {formatted_amount} em {category} ({extracted['description']})."
-        )
-
-        sofia = Sofia(db, APP_ID, client, firebase_uid)
-        alert = await sofia.check_after_register(amount, category)
-        if alert:
-            await update.message.reply_text(alert)
-        return
+        return ASK_CARD
 
     if intent == "QUERY":
         sofia = Sofia(db, APP_ID, client, firebase_uid)
-        msg = await sofia.build_query_response(
-            extracted["start_date"],
-            extracted["end_date"],
-            extracted.get("category"),
-        )
+        msg = await sofia.build_query_response(extracted["start_date"], extracted["end_date"], extracted.get("category"))
         await update.message.reply_text(msg)
-        return
+        return ConversationHandler.END
 
     if intent == "SUMMARY_MONTH":
         sofia = Sofia(db, APP_ID, client, firebase_uid)
         msg = await sofia.build_monthly_summary()
         await update.message.reply_text(msg)
-        return
+        return ConversationHandler.END
 
-    await update.message.reply_text("Não entendi se é para registrar ou consultar. Tente ser mais claro.")
+    await update.message.reply_text("Não entendi. Tente descrever seu gasto ou digitar 'resumo'.")
+    return ConversationHandler.END
 
-# ── Proactive scheduler ───────────────────────────────────────────────────────
+
+# ── Entry points (text and voice) ──────────────────────────────────────────────────
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_id = str(update.effective_user.id)
+    firebase_uid = await get_firebase_user_id(user_id)
+    if not firebase_uid:
+        await update.message.reply_text("⚠️ Você precisa vincular sua conta primeiro.\nEnvie `/start <SEU_ID>`")
+        return ConversationHandler.END
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
+    extracted = await process_with_gemini(text=update.message.text)
+    if not extracted or extracted.get("error"):
+        await update.message.reply_text("Desculpe, não entendi. Tente novamente.")
+        return ConversationHandler.END
+    return await _handle_classify(update, context, extracted, firebase_uid)
+
+
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_id = str(update.effective_user.id)
+    firebase_uid = await get_firebase_user_id(user_id)
+    if not firebase_uid:
+        await update.message.reply_text("⚠️ Você precisa vincular sua conta primeiro.")
+        return ConversationHandler.END
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
+    voice_file = await context.bot.get_file(update.message.voice.file_id)
+    file_path = f"voice_{user_id}.ogg"
+    await voice_file.download_to_drive(file_path)
+    extracted = await process_with_gemini(audio_file=file_path)
+    try:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+    except Exception:
+        pass
+    if not extracted or extracted.get("error"):
+        await update.message.reply_text("Desculpe, não entendi o áudio. Tente novamente.")
+        return ConversationHandler.END
+    return await _handle_classify(update, context, extracted, firebase_uid)
+
+
+# ── ConversationHandler step callbacks ───────────────────────────────────────────────
+
+async def ask_card_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """User chose Yes/No for credit card."""
+    query = update.callback_query
+    await query.answer()
+    if query.data == "card_no":
+        # Save as plain expense
+        tx = context.user_data.get("tx", {})
+        fuid = context.user_data.get("firebase_uid")
+        ok = save_expense_with_card(db, APP_ID, fuid, tx)
+        if ok:
+            amount = float(tx['amount'])
+            msg = f"✅ Salvo: R$ {amount:.2f} em {tx['category']}".replace(".", ",", 1)
+            await query.edit_message_text(msg)
+            sofia = Sofia(db, APP_ID, client, fuid)
+            alert = await sofia.check_after_register(amount, tx['category'])
+            if alert:
+                await context.bot.send_message(chat_id=query.message.chat_id, text=alert)
+        else:
+            await query.edit_message_text("❌ Erro ao salvar. Tente novamente.")
+        return ConversationHandler.END
+
+    # card_yes — show card list
+    fuid = context.user_data.get("firebase_uid")
+    cards = get_user_cards(db, APP_ID, fuid)
+    context.user_data["cards"] = cards
+    buttons = [[InlineKeyboardButton(c["name"], callback_data=f"card_id_{c['id']}")] for c in cards]
+    buttons.append([InlineKeyboardButton("➕ Novo cartão", callback_data="card_new")])
+    await query.edit_message_text("💳 Qual cartão?", reply_markup=InlineKeyboardMarkup(buttons))
+    return ASK_WHICH_CARD
+
+
+async def ask_which_card_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """User selected a card or wants to create a new one."""
+    query = update.callback_query
+    await query.answer()
+    if query.data == "card_new":
+        await query.edit_message_text("💳 Qual é o nome do novo cartão? (ex: Nubank, Bradesco, Inter)")
+        return ASK_NEW_CARD_NAME
+    # Existing card selected
+    card_id = query.data.replace("card_id_", "")
+    context.user_data["credit_card_id"] = card_id
+    cards = context.user_data.get("cards", [])
+    card_name = next((c["name"] for c in cards if c["id"] == card_id), card_id)
+    keyboard = [
+        [InlineKeyboardButton("✅ Sim, parcelado", callback_data="inst_yes"),
+         InlineKeyboardButton("💵 Não, à vista", callback_data="inst_no")]
+    ]
+    await query.edit_message_text(
+        f"Cartão: {card_name}\n\n📊 É parcelado?",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return ASK_INSTALLMENT
+
+
+async def ask_new_card_name_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """User typed the new card name."""
+    name = update.message.text.strip()
+    if not name:
+        await update.message.reply_text("Por favor, informe o nome do cartão.")
+        return ASK_NEW_CARD_NAME
+    fuid = context.user_data.get("firebase_uid")
+    card_id = create_card(db, APP_ID, fuid, name)
+    if not card_id:
+        await update.message.reply_text("❌ Erro ao criar cartão. Tente novamente.")
+        return ConversationHandler.END
+    context.user_data["credit_card_id"] = card_id
+    keyboard = [
+        [InlineKeyboardButton("✅ Sim, parcelado", callback_data="inst_yes"),
+         InlineKeyboardButton("💵 Não, à vista", callback_data="inst_no")]
+    ]
+    await update.message.reply_text(
+        f"Cartão '{name}' criado! ✅\n\n📊 É parcelado?",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return ASK_INSTALLMENT
+
+
+async def ask_installment_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """User chose Yes/No for installment."""
+    query = update.callback_query
+    await query.answer()
+    tx = context.user_data.get("tx", {})
+    fuid = context.user_data.get("firebase_uid")
+    card_id = context.user_data.get("credit_card_id")
+    if query.data == "inst_no":
+        ok = save_expense_with_card(db, APP_ID, fuid, tx, credit_card_id=card_id)
+        if ok:
+            amount = float(tx['amount'])
+            await query.edit_message_text(
+                f"✅ Salvo: R$ {amount:.2f} em {tx['category']} (à vista no cartão)".replace(".", ",", 1)
+            )
+            sofia = Sofia(db, APP_ID, client, fuid)
+            alert = await sofia.check_after_register(amount, tx['category'])
+            if alert:
+                await context.bot.send_message(chat_id=query.message.chat_id, text=alert)
+        else:
+            await query.edit_message_text("❌ Erro ao salvar. Tente novamente.")
+        return ConversationHandler.END
+    # inst_yes
+    await query.edit_message_text("📅 Quantas parcelas?")
+    return ASK_NUM_INSTALLMENTS
+
+
+async def ask_num_installments_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """User typed number of installments."""
+    text = update.message.text.strip().replace("x", "").replace("X", "")
+    if not text.isdigit() or int(text) < 2:
+        await update.message.reply_text("⚠️ Informe um número de parcelas válido (mínimo 2).")
+        return ASK_NUM_INSTALLMENTS
+    n = int(text)
+    tx = context.user_data.get("tx", {})
+    fuid = context.user_data.get("firebase_uid")
+    card_id = context.user_data.get("credit_card_id")
+    ok = save_installment_purchase(db, APP_ID, fuid, tx, n, credit_card_id=card_id)
+    if ok:
+        amount = float(tx['amount'])
+        total = amount * n
+        await update.message.reply_text(
+            f"✅ Parcelamento salvo: {tx['description']}\n"
+            f"{n}x de R$ {amount:.2f} = R$ {total:.2f} total\n"
+            f"Categoria: {tx['category']}".replace(".", ",")
+        )
+        sofia = Sofia(db, APP_ID, client, fuid)
+        alert = await sofia.check_after_register(amount, tx['category'])
+        if alert:
+            await update.message.reply_text(alert)
+    else:
+        await update.message.reply_text("❌ Erro ao salvar parcelamento. Tente novamente.")
+    return ConversationHandler.END
+
+
+async def conv_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Called when conversation times out."""
+    if update and update.effective_message:
+        await update.effective_message.reply_text(
+            "⏰ Tempo esgotado! O cadastro foi cancelado.\nSe quiser, comece novamente descrevendo o gasto."
+        )
+    return ConversationHandler.END
+
+
+async def conv_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text("❌ Cadastro cancelado.")
+    return ConversationHandler.END
 
 async def job_weekly_summary(bot):
     users = await get_all_mapped_users()
@@ -475,17 +651,44 @@ if __name__ == '__main__':
         .build()
     )
     
-    # Handlers
+    # ── Conversation handler for expense registration ──
+    conv_handler = ConversationHandler(
+        entry_points=[
+            MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message),
+            MessageHandler(filters.VOICE, handle_voice),
+        ],
+        states={
+            ASK_CARD: [
+                CallbackQueryHandler(ask_card_cb, pattern="^card_(yes|no)$"),
+            ],
+            ASK_WHICH_CARD: [
+                CallbackQueryHandler(ask_which_card_cb, pattern="^(card_id_.+|card_new)$"),
+            ],
+            ASK_NEW_CARD_NAME: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, ask_new_card_name_cb),
+            ],
+            ASK_INSTALLMENT: [
+                CallbackQueryHandler(ask_installment_cb, pattern="^inst_(yes|no)$"),
+            ],
+            ASK_NUM_INSTALLMENTS: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, ask_num_installments_cb),
+            ],
+            ConversationHandler.TIMEOUT: [MessageHandler(filters.ALL, conv_timeout)],
+        },
+        fallbacks=[CommandHandler('cancel', conv_cancel)],
+        conversation_timeout=CONV_TIMEOUT,
+        per_message=False,
+    )
+
     application.add_handler(CommandHandler('start', start))
-    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
-    application.add_handler(MessageHandler(filters.VOICE, handle_voice))
+    application.add_handler(conv_handler)
     application.add_error_handler(error_handler)
     
     
     scheduler = setup_scheduler(application)
     scheduler.start()
 
-    print(f"Bot Version: 2.2 (Sofia dynamic budget)")
+    print(f"Bot Version: 2.3 (income + card + installments)")
     print(f"Bot is running in MULTI-USER mode (APP_ID: {APP_ID})...")
     keep_alive()
     application.run_polling()

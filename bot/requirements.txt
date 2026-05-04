@@ -4,4 +4,4 @@ google-genai
 python-dotenv==1.0.1
 flask
 APScheduler==3.10.4
-
+python-dateutil>=2.8.2
