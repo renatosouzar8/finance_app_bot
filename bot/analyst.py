@@ -10,19 +10,13 @@ from firestore_queries import (
     get_weekly_totals_by_category_prev,
     get_sofia_state,
     save_sofia_state,
+    get_user_budget,
+    get_monthly_income,
 )
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_LIMITS: dict[str, float] = {
-    "Alimentação": 700.0,
-    "Transporte": 400.0,
-    "Lazer": 400.0,
-    "Outros": 300.0,
-}
-
 HIGH_SPEND_CATEGORIES = {"Lazer", "Alimentação", "Compras"}
-HIGH_SPEND_THRESHOLD = 200.0
 
 SOFIA_PERSONA = """
 Você é Sofia, analista financeira sênior com 15 anos de experiência em finanças pessoais.
@@ -55,6 +49,17 @@ class Sofia:
         self.client = gemini_client
         self.user_id = user_id
         self._state: Optional[dict] = None
+        self._budget: Optional[dict] = None
+
+    def _get_budget(self) -> dict:
+        """Loads and caches the user's budget (categoryLimits) from Firestore."""
+        if self._budget is None:
+            self._budget = get_user_budget(self.db, self.app_id, self.user_id)
+        return self._budget
+
+    def _get_category_limits(self) -> dict:
+        """Returns the dict of {category: limit_value} configured by the user."""
+        return self._get_budget().get("categoryLimits", {})
 
     def _load_state(self) -> dict:
         if self._state is None:
@@ -95,12 +100,17 @@ class Sofia:
 
     async def check_after_register(self, amount: float, category: str) -> Optional[str]:
         state = self._load_state()
+        limits = self._get_category_limits()
+        monthly_income = get_monthly_income(self.db, self.app_id, self.user_id)
 
+        # Only check high-spend tip if category has a limit configured
         high_spend_msg = None
-        if category in HIGH_SPEND_CATEGORIES and amount >= HIGH_SPEND_THRESHOLD:
-            high_spend_msg = await self._build_high_spend_tip(amount, category)
+        limit = limits.get(category)
+        if limit and category in HIGH_SPEND_CATEGORIES:
+            # Tip if single expense >= 40% of the category limit
+            if amount >= limit * 0.40:
+                high_spend_msg = await self._build_high_spend_tip(amount, category, limit, monthly_income)
 
-        limit = DEFAULT_LIMITS.get(category)
         alert_msg = None
         if limit:
             cat_total, cat_count = get_monthly_category_total(
@@ -111,11 +121,11 @@ class Sofia:
             prev_alert = cat_alerts.get(category, "none")
 
             if pct >= 1.0 and prev_alert != "red_sent":
-                alert_msg = await self._build_red_alert(category, cat_total, limit, cat_count)
+                alert_msg = await self._build_red_alert(category, cat_total, limit, cat_count, monthly_income)
                 cat_alerts[category] = "red_sent"
                 self._save_state()
             elif 0.80 <= pct < 1.0 and prev_alert == "none":
-                alert_msg = await self._build_yellow_alert(category, cat_total, limit, pct)
+                alert_msg = await self._build_yellow_alert(category, cat_total, limit, pct, monthly_income)
                 cat_alerts[category] = "yellow_sent"
                 self._save_state()
 
@@ -146,6 +156,9 @@ class Sofia:
             cat = e.get("category", "Outros")
             totals_by_cat[cat] = totals_by_cat.get(cat, 0.0) + float(e.get("amount", 0))
 
+        limits = self._get_category_limits()
+        monthly_income = get_monthly_income(self.db, self.app_id, self.user_id)
+
         today = datetime.date.today().isoformat()
         yesterday = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
         if start_date == end_date:
@@ -164,16 +177,17 @@ class Sofia:
         lines = []
         for cat, val in sorted(totals_by_cat.items(), key=lambda x: -x[1]):
             emoji = CATEGORY_EMOJI.get(cat, "•")
-            lim = DEFAULT_LIMITS.get(cat)
+            lim = limits.get(cat)
             pct_str = f" ({int(val/lim*100)}% do limite)" if lim else ""
             lines.append(f"{emoji} {cat}: R${val:.2f}".replace(".", ",") + pct_str)
 
         breakdown = "\n".join(lines)
         total_fmt = f"R${total:.2f}".replace(".", ",")
+        income_ctx = f"Receita do mês: R${monthly_income:.2f}. " if monthly_income > 0 else ""
 
         context_prompt = (
             f"O usuário perguntou sobre seus gastos {date_label}.\n"
-            f"Total: {total_fmt}\nDetalhes:\n{breakdown}\n\n"
+            f"{income_ctx}Total gasto: {total_fmt}\nDetalhes:\n{breakdown}\n\n"
             "Escreva apenas 1 linha curta de análise ou encorajamento (sem repetir os números). "
             "Se estiver tudo bem, diga algo neutro e útil. Não use saudação."
         )
@@ -195,19 +209,25 @@ class Sofia:
         daily_avg = total / today.day if today.day > 0 else 0
         projection = daily_avg * days_in_month
 
+        limits = self._get_category_limits()
+        monthly_income = get_monthly_income(self.db, self.app_id, self.user_id)
+
         lines = []
         for cat, val in sorted(totals.items(), key=lambda x: -x[1]):
             emoji = CATEGORY_EMOJI.get(cat, "•")
-            lim = DEFAULT_LIMITS.get(cat)
-            pct_str = f" ({int(val/lim*100)}% do limite)" if lim else ""
+            lim = limits.get(cat)
+            pct_str = f" ({int(val/lim*100)}% do planejado)" if lim else ""
             lines.append(f"{emoji} {cat}: R${val:.2f}".replace(".", ",") + pct_str)
 
         breakdown = "\n".join(lines) if lines else "Nenhum gasto registrado ainda."
         month_name = calendar.month_name[today.month]
+        income_ctx = f"Receita do mês (transações): R${monthly_income:.2f}.\n" if monthly_income > 0 else ""
+        pct_income_str = f" ({int(total/monthly_income*100)}% da receita)" if monthly_income > 0 else ""
 
         context_prompt = (
             f"Resumo de {month_name} até o dia {today.day}:\n"
-            f"Total gasto: R${total:.2f}\n"
+            f"{income_ctx}"
+            f"Total gasto: R${total:.2f}{pct_income_str}\n"
             f"Projeção para o mês: R${projection:.2f}\n"
             f"Dias restantes: {days_remaining}\n"
             f"Detalhes:\n{chr(10).join(lines)}\n\n"
@@ -281,36 +301,49 @@ class Sofia:
         return msg
 
     async def _build_yellow_alert(self, category: str, cat_total: float,
-                                   limit: float, pct: float) -> str:
+                                   limit: float, pct: float,
+                                   monthly_income: float = 0.0) -> str:
         remaining = limit - cat_total
         pct_int = int(pct * 100)
         today = datetime.date.today()
         days_remaining = calendar.monthrange(today.year, today.month)[1] - today.day
+        income_pct_str = ""
+        if monthly_income > 0:
+            income_pct = int(cat_total / monthly_income * 100)
+            income_pct_str = f" ({income_pct}% da sua receita)"
 
         prompt = (
-            f"O usuário acabou de gastar em {category} e atingiu {pct_int}% do limite mensal.\n"
-            f"Gastou no total: R${cat_total:.2f} | Limite: R${limit:.2f} | "
-            f"Restam: R${remaining:.2f} | Dias no mês: {days_remaining}\n\n"
-            f"Escreva uma mensagem de alerta amarelo no formato:\n"
-            f"⚠️ [Você + categoria + % do limite]\n"
+            f"O usuário acabou de gastar em {category} e atingiu {pct_int}% do limite planejado.\n"
+            f"Gastou no total: R${cat_total:.2f}{income_pct_str} | Limite planejado: R${limit:.2f} | "
+            f"Restam: R${remaining:.2f} | Dias no mês: {days_remaining}\n"
+            + (f"Receita do mês: R${monthly_income:.2f}\n" if monthly_income > 0 else "") +
+            f"\nEscreva uma mensagem de alerta amarelo no formato:\n"
+            f"⚠️ [Você + categoria + % do planejado]\n"
             f"[Quanto falta + dias restantes]\n"
             f"[Pergunta ou sugestão opcional — 1 linha]\n"
             f"Seja breve, sem julgamento, máx 3 linhas."
         )
         msg = self._call_gemini(prompt)
         return msg or (
-            f"⚠️ Você está em {pct_int}% do limite de {category} esse mês.\n"
+            f"⚠️ Você está em {pct_int}% do planejado para {category} esse mês.\n"
             f"Faltam R${remaining:.2f} para o limite ({days_remaining} dias ainda)."
         )
 
     async def _build_red_alert(self, category: str, cat_total: float,
-                                limit: float, count: int) -> str:
+                                limit: float, count: int,
+                                monthly_income: float = 0.0) -> str:
         excess = cat_total - limit
+        income_pct_str = ""
+        if monthly_income > 0:
+            income_pct = int(cat_total / monthly_income * 100)
+            income_pct_str = f" ({income_pct}% da sua receita)"
+
         prompt = (
-            f"O usuário ultrapassou o limite de {category} este mês.\n"
-            f"Gastou: R${cat_total:.2f} | Limite: R${limit:.2f} | "
-            f"Excesso: R${excess:.2f} | Transações: {count}\n\n"
-            f"Escreva uma mensagem de alerta vermelho:\n"
+            f"O usuário ultrapassou o limite planejado de {category} este mês.\n"
+            f"Gastou: R${cat_total:.2f}{income_pct_str} | Limite planejado: R${limit:.2f} | "
+            f"Excesso: R${excess:.2f} | Transações: {count}\n"
+            + (f"Receita do mês: R${monthly_income:.2f}\n" if monthly_income > 0 else "") +
+            f"\nEscreva uma mensagem de alerta vermelho:\n"
             f"🚨 [Limite atingido + excesso]\n"
             f"[Frase empática — sem drama]\n"
             f"[Pergunta propositiva — 1 linha]\n"
@@ -322,14 +355,22 @@ class Sofia:
             f"Acontece. Quer ver onde compensar?"
         )
 
-    async def _build_high_spend_tip(self, amount: float, category: str) -> str:
+    async def _build_high_spend_tip(self, amount: float, category: str,
+                                     limit: float = 0.0,
+                                     monthly_income: float = 0.0) -> str:
         _, count = get_monthly_category_total(
             self.db, self.app_id, self.user_id, category
         )
+        limit_ctx = f" (limite planejado: R${limit:.2f})" if limit > 0 else ""
+        income_ctx = f"Receita do mês: R${monthly_income:.2f}.\n" if monthly_income > 0 else ""
+        pct_limit = int(amount / limit * 100) if limit > 0 else 0
+        pct_str = f" — {pct_limit}% do limite da categoria" if pct_limit > 0 else ""
+
         prompt = (
-            f"O usuário registrou um gasto pontual alto: R${amount:.2f} em {category}.\n"
-            f"É o {count}º registro nessa categoria este mês.\n\n"
-            f"Escreva uma dica contextual no formato:\n"
+            f"O usuário registrou um gasto significativo: R${amount:.2f} em {category}{pct_str}.\n"
+            f"É o {count}º registro nessa categoria este mês{limit_ctx}.\n"
+            f"{income_ctx}"
+            f"\nEscreva uma dica contextual no formato:\n"
             f"💡 [R$valor em categoria — observação leve]\n"
             f"[Insight sobre o padrão]\n"
             f"[Sugestão prática em 1 linha]\n"

@@ -164,7 +164,7 @@ const AuthComponent = ({ setUser }) => {
     );
 };
 
-const TransactionForm = ({ isOpen, onClose, onSave, editingTransaction, currentMonth }) => {
+const TransactionForm = ({ isOpen, onClose, onSave, editingTransaction, currentMonth, userId }) => {
     const [description, setDescription] = useState('');
     const [amount, setAmount] = useState('');
     const [date, setDate] = useState(new Date());
@@ -175,9 +175,24 @@ const TransactionForm = ({ isOpen, onClose, onSave, editingTransaction, currentM
     const [isSuggestingCategory, setIsSuggestingCategory] = useState(false);
     const [suggestionError, setSuggestionError] = useState('');
     const [formError, setFormError] = useState('');
+    // Credit card state
+    const [isCreditCard, setIsCreditCard] = useState(false);
+    const [cards, setCards] = useState([]);
+    const [selectedCardId, setSelectedCardId] = useState('');
+    const [newCardName, setNewCardName] = useState('');
+    const [showNewCardInput, setShowNewCardInput] = useState(false);
+    const cardsPath = userId ? `artifacts/${appId}/users/${userId}/cards` : null;
 
     const isEditing = !!editingTransaction;
     const isEditingInstallment = isEditing && (editingTransaction.isInstallmentOriginal || editingTransaction.isInstallmentPayment);
+
+    // Load cards from Firestore
+    useEffect(() => {
+        if (!cardsPath || !isOpen) return;
+        const q = query(collection(db, cardsPath), orderBy('name'));
+        const unsub = onSnapshot(q, (snap) => setCards(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
+        return () => unsub();
+    }, [cardsPath, isOpen]);
 
     useEffect(() => {
         if (editingTransaction) {
@@ -191,14 +206,27 @@ const TransactionForm = ({ isOpen, onClose, onSave, editingTransaction, currentM
             if (editingTransaction.isInstallmentOriginal) {
                 setNumberOfInstallments(editingTransaction.numberOfInstallments || 10);
             }
+            setIsCreditCard(!!editingTransaction.creditCardId);
+            setSelectedCardId(editingTransaction.creditCardId || '');
         } else {
             setDescription(''); setAmount('');
             setDate(currentMonth ? startOfMonth(currentMonth) : new Date());
             setType(TRANSACTION_TYPES.EXPENSE); setCategory('');
             setIsInstallment(false); setNumberOfInstallments(10);
+            setIsCreditCard(false); setSelectedCardId(''); setNewCardName(''); setShowNewCardInput(false);
         }
         setSuggestionError(''); setFormError('');
     }, [editingTransaction, isOpen, currentMonth]);
+
+    const handleCreateCard = async () => {
+        if (!newCardName.trim() || !cardsPath) return;
+        try {
+            const ref = await addDoc(collection(db, cardsPath), { name: newCardName.trim(), createdAt: Timestamp.now() });
+            setSelectedCardId(ref.id);
+            setNewCardName('');
+            setShowNewCardInput(false);
+        } catch (e) { setFormError('Erro ao criar cartão.'); }
+    };
 
     const handleSuggestCategory = async () => {
         if (!description) { setSuggestionError("Insira uma descrição."); return; }
@@ -231,13 +259,21 @@ const TransactionForm = ({ isOpen, onClose, onSave, editingTransaction, currentM
             if (type !== editingTransaction.type) { setFormError("Não é permitido alterar o tipo de um pagamento de parcela."); return; }
         }
 
+        // Handle credit card description suffix
+        let finalDescription = description;
+        if (isCreditCard && selectedCardId) {
+            const card = cards.find(c => c.id === selectedCardId);
+            if (card) finalDescription = `${description} - via Cartão ${card.name}`;
+        }
+
         const transactionData = {
-            description,
+            description: finalDescription,
             amount: numericAmount,
             date: Timestamp.fromDate(date),
             type,
             category,
-            isInstallment
+            isInstallment,
+            ...(isCreditCard && selectedCardId ? { creditCardId: selectedCardId } : {})
         };
 
         if (isInstallment && !isEditingInstallment) {
@@ -245,7 +281,6 @@ const TransactionForm = ({ isOpen, onClose, onSave, editingTransaction, currentM
             if (isNaN(numInstallments) || numInstallments < 2) { setFormError("Número de parcelas deve ser ao menos 2."); return; }
             transactionData.numberOfInstallments = numInstallments;
         } else if (isEditingInstallment && editingTransaction.isInstallmentOriginal) {
-            // Permite editar número de parcelas na mãe
             const numInstallments = parseInt(numberOfInstallments, 10);
             if (isNaN(numInstallments) || numInstallments < 2) { setFormError("Número de parcelas deve ser ao menos 2."); return; }
             transactionData.numberOfInstallments = numInstallments;
@@ -286,6 +321,32 @@ const TransactionForm = ({ isOpen, onClose, onSave, editingTransaction, currentM
                         </button>
                     </div>
                     <select id="category-transaction-form" value={category} onChange={(e) => setCategory(e.target.value)} required className="mt-1 w-full p-3 bg-slate-700 rounded-lg dark:bg-gray-200 dark:text-slate-900"><option value="">Selecione</option>{categoriesToShow.map(cat => <option key={cat} value={cat}>{cat}</option>)}</select>{suggestionError && <p className="text-red-400 text-xs mt-1">{suggestionError}</p>}
+                </div>
+
+                {/* Credit Card Toggle */}
+                <div className="border border-slate-700/50 rounded-xl p-3 space-y-3 bg-slate-800/30">
+                    <div className="flex items-center space-x-3">
+                        <input type="checkbox" id="isCreditCard-form" checked={isCreditCard} onChange={(e) => { setIsCreditCard(e.target.checked); setSelectedCardId(''); setShowNewCardInput(false); }} className="h-5 w-5 text-violet-500 rounded" />
+                        <label htmlFor="isCreditCard-form" className="text-sm text-slate-300 flex items-center gap-2">💳 Compra com Cartão de Crédito?</label>
+                    </div>
+
+                    {isCreditCard && (
+                        <div className="space-y-2 pl-1">
+                            <select value={selectedCardId} onChange={(e) => setSelectedCardId(e.target.value)} className="w-full p-2.5 bg-slate-700 rounded-lg text-sm text-slate-200">
+                                <option value="">Selecione um cartão...</option>
+                                {cards.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                            </select>
+                            {!showNewCardInput ? (
+                                <button type="button" onClick={() => setShowNewCardInput(true)} className="text-xs text-violet-400 hover:text-violet-200 underline underline-offset-2">+ Adicionar novo cartão</button>
+                            ) : (
+                                <div className="flex gap-2">
+                                    <input type="text" placeholder="Nome do cartão (ex: Santander)" value={newCardName} onChange={(e) => setNewCardName(e.target.value)} className="flex-1 p-2 bg-slate-700 rounded-lg text-sm text-slate-200" />
+                                    <button type="button" onClick={handleCreateCard} className="px-3 py-2 bg-violet-600 hover:bg-violet-500 text-white text-xs rounded-lg">Criar</button>
+                                    <button type="button" onClick={() => setShowNewCardInput(false)} className="px-3 py-2 bg-slate-600 text-white text-xs rounded-lg">✕</button>
+                                </div>
+                            )}
+                        </div>
+                    )}
                 </div>
 
                 <div className="flex items-center space-x-3">
@@ -536,6 +597,207 @@ const GoalsSection = ({ userId }) => {
     );
 };
 
+const EXPENSE_CATEGORIES = [
+    'Moradia', 'Alimentação', 'Transporte', 'Lazer', 'Saúde',
+    'Educação', 'Compras', 'Impostos', 'Serviços', 'Dívidas', 'Outros'
+];
+
+const CATEGORY_EMOJI_MAP = {
+    'Alimentação': '🍽️', 'Transporte': '🚗', 'Lazer': '🎮', 'Moradia': '🏠',
+    'Saúde': '💊', 'Educação': '📚', 'Compras': '🛍️', 'Impostos': '🧾',
+    'Serviços': '⚙️', 'Dívidas': '💳', 'Outros': '📦'
+};
+
+const BudgetSection = ({ userId, transactions, currentMonth }) => {
+    const [limits, setLimits] = useState({});
+    const [draftLimits, setDraftLimits] = useState({});
+    const [saving, setSaving] = useState(false);
+    const [saved, setSaved] = useState(false);
+    const [error, setError] = useState('');
+
+    const budgetPath = `artifacts/${appId}/users/${userId}/settings`;
+
+    // Load existing budget from Firestore
+    useEffect(() => {
+        if (!userId) return;
+        const docRef = doc(db, budgetPath, 'budget');
+        const unsub = onSnapshot(docRef, (snap) => {
+            if (snap.exists()) {
+                const data = snap.data();
+                setLimits(data.categoryLimits || {});
+                setDraftLimits(data.categoryLimits || {});
+            }
+        });
+        return () => unsub();
+    }, [userId, budgetPath]);
+
+    // Calculate current month's spending per category from transactions
+    const monthlySpend = useMemo(() => {
+        const spend = {};
+        transactions.forEach(t => {
+            if (t.type !== 'expense') return;
+            const tDate = t.date?.toDate ? t.date.toDate() : (t.date ? new Date(t.date) : null);
+            if (!tDate || !isValid(tDate) || !isSameMonth(tDate, currentMonth)) return;
+            const cat = t.category || 'Outros';
+            spend[cat] = (spend[cat] || 0) + (t.amount || 0);
+        });
+        return spend;
+    }, [transactions, currentMonth]);
+
+    // Calculate monthly income
+    const monthlyIncome = useMemo(() => {
+        return transactions
+            .filter(t => {
+                if (t.type !== 'income') return false;
+                const tDate = t.date?.toDate ? t.date.toDate() : (t.date ? new Date(t.date) : null);
+                return tDate && isValid(tDate) && isSameMonth(tDate, currentMonth);
+            })
+            .reduce((sum, t) => sum + (t.amount || 0), 0);
+    }, [transactions, currentMonth]);
+
+    const handleLimitChange = (cat, value) => {
+        setDraftLimits(prev => ({ ...prev, [cat]: value }));
+    };
+
+    const handleSave = async () => {
+        setSaving(true); setError(''); setSaved(false);
+        try {
+            const parsed = {};
+            for (const [cat, val] of Object.entries(draftLimits)) {
+                const num = parseFloat(val);
+                if (!isNaN(num) && num > 0) parsed[cat] = num;
+            }
+            await setDoc(doc(db, budgetPath, 'budget'), { categoryLimits: parsed }, { merge: true });
+            setLimits(parsed);
+            setSaved(true);
+            setTimeout(() => setSaved(false), 2500);
+        } catch (e) {
+            setError('Falha ao salvar orçamento.');
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    const totalBudgeted = Object.values(limits).reduce((s, v) => s + (v || 0), 0);
+    const totalSpent = Object.values(monthlySpend).reduce((s, v) => s + v, 0);
+
+    return (
+        <div className="space-y-6 animate-fade-in-up">
+            {/* Header card */}
+            <div className="bg-gradient-to-br from-amber-600/20 to-orange-600/20 border border-amber-500/30 backdrop-blur-xl p-5 rounded-3xl shadow-xl">
+                <div className="flex justify-between items-start flex-wrap gap-4">
+                    <div>
+                        <h3 className="text-lg font-semibold text-amber-300 flex items-center gap-2">
+                            <Target size={20} /> Orçamento Mensal
+                        </h3>
+                        <p className="text-xs text-slate-400 mt-1">
+                            {format(currentMonth, 'MMMM yyyy', { locale: ptBR })}
+                        </p>
+                    </div>
+                    <div className="flex gap-6 text-right">
+                        <div>
+                            <p className="text-xs text-slate-400 uppercase tracking-wider">Receita do mês</p>
+                            <p className="text-xl font-bold text-green-400">R$ {monthlyIncome.toFixed(2)}</p>
+                        </div>
+                        <div>
+                            <p className="text-xs text-slate-400 uppercase tracking-wider">Total planejado</p>
+                            <p className="text-xl font-bold text-amber-300">R$ {totalBudgeted.toFixed(2)}</p>
+                        </div>
+                        <div>
+                            <p className="text-xs text-slate-400 uppercase tracking-wider">Gasto no mês</p>
+                            <p className="text-xl font-bold text-rose-400">R$ {totalSpent.toFixed(2)}</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            {/* Category cards */}
+            <div className="bg-slate-800/40 border border-slate-700/50 backdrop-blur-xl rounded-3xl p-5 shadow-xl">
+                <p className="text-sm text-slate-400 mb-5">
+                    Defina quanto você planeja gastar em cada categoria. A Sofia usará esses valores para calcular 
+                    as porcentagens e enviar alertas personalizados.
+                </p>
+                <div className="space-y-5">
+                    {EXPENSE_CATEGORIES.map(cat => {
+                        const limit = parseFloat(draftLimits[cat]) || 0;
+                        const spent = monthlySpend[cat] || 0;
+                        const pct = limit > 0 ? Math.min((spent / limit) * 100, 100) : 0;
+                        const incomePct = monthlyIncome > 0 && limit > 0 ? ((limit / monthlyIncome) * 100).toFixed(0) : null;
+                        const isOver = spent > limit && limit > 0;
+                        const isWarn = pct >= 80 && !isOver;
+                        const barColor = isOver ? 'bg-rose-500' : isWarn ? 'bg-amber-400' : 'bg-cyan-500';
+
+                        return (
+                            <div key={cat} className="space-y-2">
+                                <div className="flex items-center justify-between gap-3 flex-wrap">
+                                    <div className="flex items-center gap-2 min-w-[140px]">
+                                        <span className="text-lg">{CATEGORY_EMOJI_MAP[cat] || '•'}</span>
+                                        <span className="text-sm font-medium text-slate-200">{cat}</span>
+                                        {incomePct && (
+                                            <span className="text-xs text-slate-500 bg-slate-700/50 px-1.5 py-0.5 rounded-full">
+                                                {incomePct}% da renda
+                                            </span>
+                                        )}
+                                    </div>
+                                    <div className="flex items-center gap-3 flex-1 justify-end">
+                                        <span className={`text-xs font-medium ${isOver ? 'text-rose-400' : isWarn ? 'text-amber-400' : 'text-slate-400'}`}>
+                                            R$ {spent.toFixed(2)} {limit > 0 ? `/ R$ ${limit.toFixed(2)}` : ''}
+                                        </span>
+                                        <div className="flex items-center gap-1.5">
+                                            <span className="text-xs text-slate-500">R$</span>
+                                            <input
+                                                id={`budget-${cat}`}
+                                                type="number"
+                                                min="0"
+                                                step="10"
+                                                placeholder="0"
+                                                value={draftLimits[cat] || ''}
+                                                onChange={(e) => handleLimitChange(cat, e.target.value)}
+                                                className="w-24 p-1.5 bg-slate-700/70 border border-slate-600/50 rounded-lg text-sm text-slate-100 text-right focus:outline-none focus:border-amber-500/70 focus:ring-1 focus:ring-amber-500/30"
+                                            />
+                                        </div>
+                                    </div>
+                                </div>
+                                {limit > 0 && (
+                                    <div className="w-full bg-slate-700/50 rounded-full h-1.5">
+                                        <div
+                                            className={`h-1.5 rounded-full transition-all duration-500 ${barColor}`}
+                                            style={{ width: `${pct}%` }}
+                                        />
+                                    </div>
+                                )}
+                            </div>
+                        );
+                    })}
+                </div>
+
+                {error && <p className="mt-4 text-red-400 text-sm bg-red-500/10 p-3 rounded-xl">{error}</p>}
+
+                <div className="mt-6 flex justify-end">
+                    <button
+                        id="budget-save-btn"
+                        onClick={handleSave}
+                        disabled={saving}
+                        className={`flex items-center gap-2 px-6 py-2.5 rounded-xl font-semibold text-sm transition-all duration-300 
+                            ${saved
+                                ? 'bg-emerald-500/30 text-emerald-300 border border-emerald-500/40'
+                                : 'bg-amber-500 hover:bg-amber-400 text-slate-900 shadow-lg shadow-amber-500/20 active:scale-95'
+                            } disabled:opacity-60`}
+                    >
+                        {saving ? (
+                            <><Loader2 size={16} className="animate-spin" /> Salvando...</>
+                        ) : saved ? (
+                            <><CheckCircle size={16} /> Salvo!</>
+                        ) : (
+                            <><Target size={16} /> Salvar Orçamento</>
+                        )}
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+};
+
 const Dashboard = ({ user, handleLogout, theme, toggleTheme, isTelegramModalOpen, setIsTelegramModalOpen }) => {
     const [normalTransactions, setNormalTransactions] = useState([]);
     const [enrichedInstallmentPayments, setEnrichedInstallmentPayments] = useState([]);
@@ -544,7 +806,10 @@ const Dashboard = ({ user, handleLogout, theme, toggleTheme, isTelegramModalOpen
     const [editingTransaction, setEditingTransaction] = useState(null);
     const [searchTerm, setSearchTerm] = useState('');
     const [transactionTypeFilter, setTransactionTypeFilter] = useState('all');
-    const [activeTab, setActiveTab] = useState('dashboard'); // 'dashboard', 'installments', 'goals', or 'connections'
+    const [selectedCategories, setSelectedCategories] = useState([]);
+    const [selectedCards, setSelectedCards] = useState([]);
+    const [allCards, setAllCards] = useState([]);
+    const [activeTab, setActiveTab] = useState('dashboard');
 
     const [loadingNormalTrans, setLoadingNormalTrans] = useState(true);
     const [loadingPayments, setLoadingPayments] = useState(true);
@@ -566,6 +831,15 @@ const Dashboard = ({ user, handleLogout, theme, toggleTheme, isTelegramModalOpen
     const transactionsPath = `artifacts/${appId}/users/${userId}/transactions`;
     const installmentsPath = `artifacts/${appId}/users/${userId}/installments`;
     const installmentPaymentsPath = `artifacts/${appId}/users/${userId}/installment_payments`;
+    const cardsPath = `artifacts/${appId}/users/${userId}/cards`;
+
+    // Load all user cards for the filter
+    useEffect(() => {
+        if (!userId) return;
+        const q = query(collection(db, cardsPath), orderBy('name'));
+        const unsub = onSnapshot(q, (snap) => setAllCards(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
+        return () => unsub();
+    }, [userId, cardsPath]);
 
     // Effect for normal transactions
     useEffect(() => {
@@ -661,9 +935,11 @@ const Dashboard = ({ user, handleLogout, theme, toggleTheme, isTelegramModalOpen
             const searchTermLower = searchTerm.toLowerCase();
             const searchMatch = (t.description && t.description.toLowerCase().includes(searchTermLower)) ||
                 (t.category && t.category.toLowerCase().includes(searchTermLower));
-            return monthMatch && typeMatch && searchMatch;
+            const categoryMatch = selectedCategories.length === 0 || selectedCategories.includes(t.category);
+            const cardMatch = selectedCards.length === 0 || selectedCards.includes(t.creditCardId);
+            return monthMatch && typeMatch && searchMatch && categoryMatch && cardMatch;
         });
-    }, [combinedTransactions, currentMonth, searchTerm, transactionTypeFilter]);
+    }, [combinedTransactions, currentMonth, searchTerm, transactionTypeFilter, selectedCategories, selectedCards]);
 
     // Calcula o saldo total das transações filtradas
     const totalFilteredTransactionsAmount = useMemo(() => {
@@ -867,11 +1143,12 @@ const Dashboard = ({ user, handleLogout, theme, toggleTheme, isTelegramModalOpen
                 </div>
 
                 {/* TABS (Pill Shape) */}
-                <div className="flex bg-slate-800/50 p-1 rounded-2xl mx-auto max-w-md border border-slate-700/50">
-                    <button onClick={() => setActiveTab('dashboard')} className={`flex-1 py-2 px-3 rounded-xl text-xs md:text-sm font-medium transition-all duration-300 ${activeTab === 'dashboard' ? 'bg-cyan-500 text-white shadow-lg shadow-cyan-500/25' : 'text-slate-400 hover:text-slate-200'}`}>Visão Geral</button>
-                    <button onClick={() => setActiveTab('installments')} className={`flex-1 py-2 px-3 rounded-xl text-xs md:text-sm font-medium transition-all duration-300 ${activeTab === 'installments' ? 'bg-violet-500 text-white shadow-lg shadow-violet-500/25' : 'text-slate-400 hover:text-slate-200'}`}>Parcelas</button>
-                    <button onClick={() => setActiveTab('goals')} className={`flex-1 py-2 px-3 rounded-xl text-xs md:text-sm font-medium transition-all duration-300 ${activeTab === 'goals' ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-500/25' : 'text-slate-400 hover:text-slate-200'}`}>Metas</button>
-                    <button onClick={() => setActiveTab('connections')} className={`flex-1 py-2 px-3 rounded-xl text-xs md:text-sm font-medium transition-all duration-300 ${activeTab === 'connections' ? 'bg-cyan-500 text-white shadow-lg shadow-cyan-500/25' : 'text-slate-400 hover:text-slate-200'}`}>Conexões</button>
+                <div className="flex bg-slate-800/50 p-1 rounded-2xl mx-auto max-w-xl border border-slate-700/50 overflow-x-auto no-scrollbar">
+                    <button id="tab-dashboard" onClick={() => setActiveTab('dashboard')} className={`flex-1 py-2 px-2 rounded-xl text-xs md:text-sm font-medium transition-all duration-300 whitespace-nowrap ${activeTab === 'dashboard' ? 'bg-cyan-500 text-white shadow-lg shadow-cyan-500/25' : 'text-slate-400 hover:text-slate-200'}`}>Visão Geral</button>
+                    <button id="tab-orcamento" onClick={() => setActiveTab('orcamento')} className={`flex-1 py-2 px-2 rounded-xl text-xs md:text-sm font-medium transition-all duration-300 whitespace-nowrap ${activeTab === 'orcamento' ? 'bg-amber-500 text-slate-900 shadow-lg shadow-amber-500/25' : 'text-slate-400 hover:text-slate-200'}`}>Orçamento</button>
+                    <button id="tab-installments" onClick={() => setActiveTab('installments')} className={`flex-1 py-2 px-2 rounded-xl text-xs md:text-sm font-medium transition-all duration-300 whitespace-nowrap ${activeTab === 'installments' ? 'bg-violet-500 text-white shadow-lg shadow-violet-500/25' : 'text-slate-400 hover:text-slate-200'}`}>Parcelas</button>
+                    <button id="tab-goals" onClick={() => setActiveTab('goals')} className={`flex-1 py-2 px-2 rounded-xl text-xs md:text-sm font-medium transition-all duration-300 whitespace-nowrap ${activeTab === 'goals' ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-500/25' : 'text-slate-400 hover:text-slate-200'}`}>Metas</button>
+                    <button id="tab-connections" onClick={() => setActiveTab('connections')} className={`flex-1 py-2 px-2 rounded-xl text-xs md:text-sm font-medium transition-all duration-300 whitespace-nowrap ${activeTab === 'connections' ? 'bg-cyan-500 text-white shadow-lg shadow-cyan-500/25' : 'text-slate-400 hover:text-slate-200'}`}>Conexões</button>
                 </div>
 
                 {activeTab === 'dashboard' && (
@@ -888,8 +1165,6 @@ const Dashboard = ({ user, handleLogout, theme, toggleTheme, isTelegramModalOpen
                                 <h3 className="text-lg font-semibold text-slate-200">Transações Recentes</h3>
                                 <button onClick={() => { setEditingTransaction(null); setIsModalOpen(true); }} className="bg-cyan-500 hover:bg-cyan-400 text-slate-900 rounded-full p-2 shadow-lg shadow-cyan-500/20 transition-transform active:scale-95"><PlusCircle size={24} /></button>
                             </div>
-
-                            {/* Filters Small Row */}
                             <div className="flex space-x-2 overflow-x-auto pb-2 no-scrollbar">
                                 <input type="text" placeholder="Buscar..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="bg-slate-800/50 border border-slate-700/50 rounded-xl px-4 py-2 text-sm text-slate-200 focus:outline-none focus:border-cyan-500/50 min-w-[150px]" />
                                 <select value={transactionTypeFilter} onChange={(e) => setTransactionTypeFilter(e.target.value)} className="bg-slate-800/50 border border-slate-700/50 rounded-xl px-4 py-2 text-sm text-slate-200 focus:outline-none focus:border-cyan-500/50">
@@ -899,16 +1174,68 @@ const Dashboard = ({ user, handleLogout, theme, toggleTheme, isTelegramModalOpen
                                 </select>
                             </div>
 
-                            {/* Insight IA Card - Compact */}
-                            <div className="bg-gradient-to-r from-violet-900/40 to-fuchsia-900/40 border border-violet-500/20 p-4 rounded-2xl flex items-start gap-4 backdrop-blur-sm">
-                                <div className="p-2 bg-violet-500/20 rounded-xl shrink-0"><Zap size={20} className="text-violet-300" /></div>
-                                <div className="flex-1">
-                                    <h4 className="text-sm font-medium text-violet-200 mb-1">Dica Financeira IA</h4>
-                                    {isLoadingInsight ? <p className="text-xs text-slate-400 animate-pulse">Consultando o oráculo...</p> :
-                                        financialInsight ? <p className="text-xs text-slate-300 italic">"{financialInsight}"</p> :
-                                            <button onClick={handleGenerateFinancialInsight} disabled={!GEMINI_API_KEY} className="text-xs text-violet-300 hover:text-white underline decoration-violet-500/50 underline-offset-2">Gerar análise agora</button>}
-                                </div>
+                            {/* Category Filter Pills - only categories present in current month */}
+                            <div className="flex flex-wrap gap-2">
+                                {[...new Set(filteredTransactions.filter(t => t.category).map(t => t.category))].sort().map(cat => {
+                                    const isSelected = selectedCategories.includes(cat);
+                                    return (
+                                        <button
+                                            key={cat}
+                                            onClick={() => setSelectedCategories(prev =>
+                                                isSelected ? prev.filter(c => c !== cat) : [...prev, cat]
+                                            )}
+                                            className={`px-3 py-1 rounded-full text-xs font-medium border transition-all duration-200 ${
+                                                isSelected
+                                                    ? 'bg-cyan-500/30 border-cyan-400/60 text-cyan-200 shadow-sm shadow-cyan-500/20'
+                                                    : 'bg-slate-800/50 border-slate-700/50 text-slate-400 hover:border-slate-500 hover:text-slate-200'
+                                            }`}
+                                        >
+                                            {cat}
+                                        </button>
+                                    );
+                                })}
+                                {selectedCategories.length > 0 && (
+                                    <button
+                                        onClick={() => setSelectedCategories([])}
+                                        className="px-3 py-1 rounded-full text-xs font-medium border border-red-500/40 bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-all duration-200 flex items-center gap-1"
+                                    >
+                                        <XCircle size={12} /> Limpar
+                                    </button>
+                                )}
                             </div>
+
+                            {/* Credit Card Filter Pills */}
+                            {allCards.length > 0 && (
+                                <div className="flex flex-wrap gap-2">
+                                    <span className="text-xs text-slate-500 self-center mr-1 flex items-center gap-1">💳 Cartões:</span>
+                                    {allCards.map(card => {
+                                        const isSelected = selectedCards.includes(card.id);
+                                        return (
+                                            <button
+                                                key={card.id}
+                                                onClick={() => setSelectedCards(prev =>
+                                                    isSelected ? prev.filter(id => id !== card.id) : [...prev, card.id]
+                                                )}
+                                                className={`px-3 py-1 rounded-full text-xs font-medium border transition-all duration-200 ${
+                                                    isSelected
+                                                        ? 'bg-violet-500/30 border-violet-400/60 text-violet-200 shadow-sm shadow-violet-500/20'
+                                                        : 'bg-slate-800/50 border-slate-700/50 text-slate-400 hover:border-slate-500 hover:text-slate-200'
+                                                }`}
+                                            >
+                                                {card.name}
+                                            </button>
+                                        );
+                                    })}
+                                    {selectedCards.length > 0 && (
+                                        <button
+                                            onClick={() => setSelectedCards([])}
+                                            className="px-3 py-1 rounded-full text-xs font-medium border border-red-500/40 bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-all duration-200 flex items-center gap-1"
+                                        >
+                                            <XCircle size={12} /> Limpar
+                                        </button>
+                                    )}
+                                </div>
+                            )}
 
                             {globalLoading ? (
                                 <div className="flex justify-center py-10"><Loader2 className="animate-spin text-cyan-500" size={32} /></div>
@@ -925,6 +1252,10 @@ const Dashboard = ({ user, handleLogout, theme, toggleTheme, isTelegramModalOpen
                             )}
                         </div>
                     </div>
+                )}
+
+                {activeTab === 'orcamento' && (
+                    <BudgetSection userId={userId} transactions={combinedTransactions} currentMonth={currentMonth} />
                 )}
 
                 {activeTab === 'installments' && (
@@ -946,7 +1277,7 @@ const Dashboard = ({ user, handleLogout, theme, toggleTheme, isTelegramModalOpen
                 )}
             </main>
 
-            <TransactionForm isOpen={isModalOpen} onClose={() => { setIsModalOpen(false); setEditingTransaction(null); }} onSave={handleSaveTransaction} editingTransaction={editingTransaction} currentMonth={currentMonth} />
+            <TransactionForm isOpen={isModalOpen} onClose={() => { setIsModalOpen(false); setEditingTransaction(null); }} onSave={handleSaveTransaction} editingTransaction={editingTransaction} currentMonth={currentMonth} userId={userId} />
 
             {/* Telegram Connect Modal */}
             <Modal isOpen={isTelegramModalOpen} onClose={() => setIsTelegramModalOpen(false)} title="Conectar Telegram">

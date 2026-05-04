@@ -144,3 +144,45 @@ def save_sofia_state(db, app_id: str, user_id: str, state: dict) -> None:
         doc_ref.set(state, merge=True)
     except Exception as e:
         logger.error(f"save_sofia_state error: {e}")
+
+
+def get_user_budget(db, app_id: str, user_id: str) -> dict:
+    """
+    Loads the user's budget config from Firestore.
+    Returns { "categoryLimits": { "Lazer": 500.0, ... } } or {} if not configured.
+    """
+    try:
+        doc_ref = db.collection(f"artifacts/{app_id}/users/{user_id}/settings").document("budget")
+        doc = doc_ref.get()
+        if doc.exists:
+            return doc.to_dict()
+        return {}
+    except Exception as e:
+        logger.error(f"get_user_budget error: {e}")
+        return {}
+
+
+def get_monthly_income(db, app_id: str, user_id: str,
+                       year: int = None, month: int = None) -> float:
+    """
+    Returns the sum of all income-type transactions for the given month.
+    Defaults to the current month.
+    """
+    today = datetime.date.today()
+    year = year or today.year
+    month = month or today.month
+    start_dt, end_dt = get_month_range(year, month)
+    try:
+        collection_path = f"artifacts/{app_id}/users/{user_id}/transactions"
+        query_ref = (
+            db.collection(collection_path)
+            .where("type", "==", "income")
+            .where("date", ">=", start_dt)
+            .where("date", "<=", end_dt)
+        )
+        docs = query_ref.stream()
+        return sum(float(d.to_dict().get("amount", 0)) for d in docs)
+    except Exception as e:
+        logger.error(f"get_monthly_income error: {e}")
+        return 0.0
+
