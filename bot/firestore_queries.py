@@ -35,14 +35,13 @@ def query_expenses_by_period(db, app_id: str, user_id: str,
     all_expenses = []
     collections_to_query = ["transactions", "installment_payments"]
     
+    logger.info(f"Sofia Query Start: {start_dt} End: {end_dt} Category: {category}")
+    
     for coll in collections_to_query:
         try:
             collection_path = f"artifacts/{app_id}/users/{user_id}/{coll}"
-            query_ref = (
-                db.collection(collection_path)
-                .where("date", ">=", start_dt)
-                .where("date", "<=", end_dt)
-            )
+            query_ref = db.collection(collection_path).where("date", ">=", start_dt).where("date", "<=", end_dt)
+            
             if category:
                 query_ref = query_ref.where("category", "==", category)
 
@@ -50,6 +49,10 @@ def query_expenses_by_period(db, app_id: str, user_id: str,
             found_count = 0
             for d in docs:
                 data = d.to_dict()
+                # Debug: log the first doc found in each collection
+                if found_count == 0:
+                    logger.info(f"Sofia Sample doc from {coll}: {data.get('description')} | type: {data.get('type')} | cat: {data.get('category')}")
+                
                 if data.get("type") == "expense":
                     all_expenses.append(data)
                     found_count += 1
