@@ -31,23 +31,29 @@ def query_expenses_by_period(db, app_id: str, user_id: str,
     """
     Returns a list of expense dicts within the given datetime range.
     Optionally filtered by category.
+    Includes both one-off transactions and installment payments.
     """
-    try:
-        collection_path = f"artifacts/{app_id}/users/{user_id}/transactions"
-        query_ref = (
-            db.collection(collection_path)
-            .where("type", "==", "expense")
-            .where("date", ">=", start_dt)
-            .where("date", "<=", end_dt)
-        )
-        if category:
-            query_ref = query_ref.where("category", "==", category)
+    all_expenses = []
+    collections_to_query = ["transactions", "installment_payments"]
+    
+    for coll in collections_to_query:
+        try:
+            collection_path = f"artifacts/{app_id}/users/{user_id}/{coll}"
+            query_ref = (
+                db.collection(collection_path)
+                .where("type", "==", "expense")
+                .where("date", ">=", start_dt)
+                .where("date", "<=", end_dt)
+            )
+            if category:
+                query_ref = query_ref.where("category", "==", category)
 
-        docs = query_ref.stream()
-        return [doc.to_dict() for doc in docs]
-    except Exception as e:
-        logger.error(f"query_expenses_by_period error: {e}")
-        return []
+            docs = query_ref.stream()
+            all_expenses.extend([doc.to_dict() for doc in docs])
+        except Exception as e:
+            logger.error(f"query_expenses_by_period error in collection {coll}: {e}")
+            
+    return all_expenses
 
 
 def get_monthly_totals_by_category(db, app_id: str, user_id: str,
