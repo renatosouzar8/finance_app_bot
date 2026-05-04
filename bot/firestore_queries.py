@@ -35,35 +35,59 @@ def query_expenses_by_period(db, app_id: str, user_id: str,
     all_expenses = []
     collections_to_query = ["transactions", "installment_payments"]
     
-    # Trim and lowercase category for robust matching
     target_category = category.strip().lower() if category else None
     
-    logger.info(f"Sofia Query Start: {start_dt} End: {end_dt} Category: {category} (Target: {target_category})")
+    # Ensure start/end are comparable
+    logger.info(f"Sofia Query Start: {start_dt} End: {end_dt} Category: {category}")
     
     for coll in collections_to_query:
         try:
             collection_path = f"artifacts/{app_id}/users/{user_id}/{coll}"
             logger.info(f"Sofia Querying path: {collection_path}")
-            # Fetch EVERYTHING in the date range to be 100% sure we don't miss anything due to indexing
-            query_ref = db.collection(collection_path).where("date", ">=", start_dt).where("date", "<=", end_dt)
             
-            docs = list(query_ref.stream())
+            # For installment_payments, we fetch ALL and filter in Python to be safe against field naming (date vs dueDate)
+            # For transactions, we keep the date filter as it's usually much larger
+            if coll == "installment_payments":
+                docs = list(db.collection(collection_path).stream())
+            else:
+                docs = list(db.collection(collection_path).where("date", ">=", start_dt).where("date", "<=", end_dt).stream())
+            
             found_count = 0
             for d in docs:
                 data = d.to_dict()
                 
+                # Determine the item date (fallback to dueDate)
+                item_date_raw = data.get("date") or data.get("dueDate")
+                if not item_date_raw:
+                    continue
+                    
+                # Convert to datetime if it's a Timestamp
+                item_date = item_date_raw if isinstance(item_date_raw, datetime.datetime) else None
+                if hasattr(item_date_raw, "to_datetime"): # Handle Firestore Timestamp
+                    item_date = item_date_raw.to_datetime()
+                
+                if not item_date:
+                    continue
+
+                # Filter by date range (if not filtered by Firestore)
+                if coll == "installment_payments":
+                    # Make naive for comparison if needed, or handle TZs
+                    # Firestore dates are usually offset-aware UTC. start_dt/end_dt are naive.
+                    # We convert everything to naive UTC for safe comparison.
+                    it_date_naive = item_date.replace(tzinfo=None)
+                    if not (start_dt <= it_date_naive <= end_dt):
+                        continue
+
                 # Manual filtering in Python
                 item_type = str(data.get("type", "")).strip().lower()
                 item_category = str(data.get("category", "")).strip().lower()
                 
-                # Check if it's an expense
                 if item_type == "expense":
-                    # Check if category matches (if provided)
                     if not target_category or item_category == target_category:
                         all_expenses.append(data)
                         found_count += 1
             
-            logger.info(f"Sofia Query: {coll} found {len(docs)} total docs in range, {found_count} matched filters.")
+            logger.info(f"Sofia Query: {coll} found {len(docs)} total docs in collection, {found_count} matched all filters.")
                     
         except Exception as e:
             logger.error(f"query_expenses_by_period error in collection {coll}: {e}")
