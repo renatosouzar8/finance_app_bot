@@ -26,6 +26,7 @@ from firestore_queries import (
     save_installment_purchase,
     get_user_categories,
     create_category,
+    has_registered_today,
 )
 
 # ── Conversation states ────────────────────────────────────────────────────────
@@ -712,6 +713,29 @@ async def job_biweekly_checkin(bot):
             logger.error(f"Biweekly check-in error for {user}: {e}")
 
 
+async def job_daily_reminder(bot):
+    """Checks daily at 21h if the user registered anything. If not, sends a funny reminder."""
+    users = await get_all_mapped_users()
+    reminders = [
+        "E aí, não tem nada pra registrar hoje? 🧐 Não teve nenhum gasto? Conta pra mim! rsrs",
+        "Opa! Passando pra lembrar... nenhum gasto hoje? Que milagre! 🎉 Ou você esqueceu de anotar? 👀",
+        "Toc toc! 🚪 A Sofia está de olho no seu bolso. Nada a declarar hoje? 📝",
+        "Dia quase acabando e nenhum registro! Você é muito econômico(a) ou só esqueceu de mim? 😂💸"
+    ]
+    for user in users:
+        try:
+            tid, fuid = user["telegram_id"], user["firebase_uid"]
+            if not tid or not fuid:
+                continue
+            
+            registered = has_registered_today(db, APP_ID, fuid)
+            if not registered:
+                msg = random.choice(reminders)
+                await bot.send_message(chat_id=tid, text=msg)
+        except Exception as e:
+            logger.error(f"Daily reminder error for {user}: {e}")
+
+
 def setup_scheduler(app) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone="America/Sao_Paulo")
     scheduler.add_job(
@@ -728,6 +752,11 @@ def setup_scheduler(app) -> AsyncIOScheduler:
         job_biweekly_checkin,
         trigger=CronTrigger(day=15, hour=9, minute=0, timezone="America/Sao_Paulo"),
         args=[app.bot], id="biweekly_checkin", replace_existing=True,
+    )
+    scheduler.add_job(
+        job_daily_reminder,
+        trigger=CronTrigger(hour=21, minute=0, timezone="America/Sao_Paulo"),
+        args=[app.bot], id="daily_reminder", replace_existing=True,
     )
     return scheduler
 

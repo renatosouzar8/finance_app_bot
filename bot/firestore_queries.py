@@ -352,3 +352,27 @@ def save_installment_purchase(db, app_id: str, user_id: str, data: dict,
     except Exception as e:
         logger.error(f"save_installment_purchase error: {e}")
         return False
+
+
+def has_registered_today(db, app_id: str, user_id: str) -> bool:
+    """Checks if the user registered any transaction or installment today."""
+    try:
+        today_start = datetime.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        
+        # Check transactions
+        tx_col = db.collection(f"artifacts/{app_id}/users/{user_id}/transactions")
+        tx_docs = tx_col.where("createdAt", ">=", today_start).limit(1).get()
+        if tx_docs:
+            return True
+            
+        # Check installments
+        inst_col = db.collection(f"artifacts/{app_id}/users/{user_id}/installments")
+        inst_docs = inst_col.where("createdAt", ">=", today_start).limit(1).get()
+        if inst_docs:
+            return True
+            
+        return False
+    except Exception as e:
+        logger.error(f"has_registered_today error: {e}")
+        # Return True so we don't spam the user if there's a DB error
+        return True
