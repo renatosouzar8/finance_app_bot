@@ -59,14 +59,14 @@ const CATEGORIES = {
 const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#8884D8', '#82Ca9D', '#FF7F50', '#DC143C', '#A020F0', '#FF69B4', '#FFD700', '#ADFF2F', '#7B68EE', '#DB7093', '#F08080'];
 
 // Constantes da API Gemini
-const GEMINI_API_KEY = ""; 
+const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
 const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`;
 
 // Função auxiliar para chamar a API Gemini
 const callGeminiAPI = async (prompt) => {
     console.log("Enviando prompt para Gemini:", prompt);
     if (!GEMINI_API_KEY) {
-        throw new Error("GEMINI_API_KEY não está configurada.");
+        throw new Error("A chave da API Gemini não está configurada no ambiente.");
     }
     try {
         const payload = {
@@ -80,7 +80,13 @@ const callGeminiAPI = async (prompt) => {
         if (!response.ok) {
             const errorData = await response.json();
             console.error("Erro na API Gemini (resposta não OK):", response.status, errorData);
-            throw new Error(`Erro na API Gemini: ${response.statusText} - ${JSON.stringify(errorData)}`);
+            let userFriendlyMessage = `Erro na API Gemini: ${response.statusText}`;
+            if (response.status === 400) {
+                userFriendlyMessage = "A chave da API Gemini é inválida ou expirou. Verifique suas configurações.";
+            } else if (errorData?.error?.message) {
+                userFriendlyMessage = `Erro na API: ${errorData.error.message}`;
+            }
+            throw new Error(userFriendlyMessage);
         }
         const result = await response.json();
         console.log("Resposta completa da Gemini:", JSON.stringify(result, null, 2));
@@ -95,7 +101,7 @@ const callGeminiAPI = async (prompt) => {
             console.warn("Resposta inesperada ou vazia da API Gemini:", result);
             if (result.promptFeedback && result.promptFeedback.blockReason) {
                  console.error("Prompt bloqueado pela API Gemini:", result.promptFeedback.blockReason, result.promptFeedback.safetyRatings);
-                 throw new Error(`Prompt bloqueado: ${result.promptFeedback.blockReason}`);
+                 throw new Error(`Prompt bloqueado por segurança: ${result.promptFeedback.blockReason}`);
             }
             return null; 
         }
