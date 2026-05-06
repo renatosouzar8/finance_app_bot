@@ -267,49 +267,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode='Markdown'
             )
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.effective_user.id)
-    firebase_uid = await get_firebase_user_id(user_id)
-    
-    if not firebase_uid:
-        await update.message.reply_text("⚠️ Você precisa vincular sua conta primeiro.\nEnvie `/start <SEU_ID>`")
-        return
-
-    user_text = update.message.text
-    print(f"DEBUG: Processing for user {user_id} -> {firebase_uid}")
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
-    
-    extracted = await process_with_gemini(text=user_text)
-    await respond_to_user(update, context, extracted, firebase_uid)
-
-async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.effective_user.id)
-    firebase_uid = await get_firebase_user_id(user_id)
-    
-    if not firebase_uid:
-        await update.message.reply_text("⚠️ Você precisa vincular sua conta primeiro.")
-        return
-
-    print("DEBUG: Received voice message")
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
-    
-    voice_file = await context.bot.get_file(update.message.voice.file_id)
-    file_path = f"voice_{user_id}.ogg" # Unique filename
-    await voice_file.download_to_drive(file_path)
-    
-    extracted = await process_with_gemini(audio_file=file_path)
-
-    # Respond first to ensure user gets feedback
-    await respond_to_user(update, context, extracted, firebase_uid)
-    
-    # Cleanup afterwards
-    try:
-        if os.path.exists(file_path):
-            os.remove(file_path)
-            print(f"DEBUG: Deleted {file_path}")
-    except Exception as e:
-        logging.warning(f"Failed to delete temp file {file_path}: {e}")
-
 def _expense_confirmation(data: dict) -> str:
     """Formats a short confirmation line for an expense."""
     amount = float(data['amount'])
@@ -343,9 +300,6 @@ async def _handle_classify(update: Update, context: ContextTypes.DEFAULT_TYPE, e
         # Store parsed data and start multi-step conversation
         context.user_data["tx"] = extracted
         context.user_data["firebase_uid"] = firebase_uid
-        # Load and cache user categories for this conversation
-        user_cats = get_user_categories(db, APP_ID, firebase_uid)
-        context.user_data["user_categories"] = user_cats
 
         # Fast path: user already said "à vista" — just confirm
         if extracted.get("payment_method") == "cash":
@@ -396,6 +350,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return ConversationHandler.END
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
     user_cats = get_user_categories(db, APP_ID, firebase_uid)
+    context.user_data["user_categories"] = user_cats
     extracted = await process_with_gemini(text=update.message.text, user_categories=user_cats)
     if not extracted or extracted.get("error"):
         await update.message.reply_text("Desculpe, não entendi. Tente novamente.")
@@ -414,6 +369,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     file_path = f"voice_{user_id}.ogg"
     await voice_file.download_to_drive(file_path)
     user_cats = get_user_categories(db, APP_ID, firebase_uid)
+    context.user_data["user_categories"] = user_cats
     extracted = await process_with_gemini(audio_file=file_path, user_categories=user_cats)
     try:
         if os.path.exists(file_path):
