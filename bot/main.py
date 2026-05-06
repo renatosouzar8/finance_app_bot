@@ -31,7 +31,7 @@ from firestore_queries import (
 
 # ── Conversation states ────────────────────────────────────────────────────────
 ASK_CARD, ASK_WHICH_CARD, ASK_NEW_CARD_NAME, ASK_INSTALLMENT, ASK_NUM_INSTALLMENTS, \
-    ASK_CATEGORY, ASK_NEW_CATEGORY_NAME = range(7)
+    ASK_CATEGORY, ASK_NEW_CATEGORY_NAME, CONFIRM_CASH = range(8)
 CONV_TIMEOUT = 300  # 5 minutes
 
 # Load environment variables
@@ -144,7 +144,7 @@ async def process_with_gemini(text=None, audio_file=None, user_categories: list 
 
     ### Scenario 1a: Registering an EXPENSE
     User reports spending money ("gastei", "paguei", "comprei", "spent", "paid", "bought", etc.):
-    {{"intent": "REGISTER_EXPENSE", "amount": <number>, "category": <expense category or "Outros">, "description": <short text>, "date": <YYYY-MM-DD>}}
+    {{"intent": "REGISTER_EXPENSE", "amount": <number>, "category": <expense category or "Outros">, "description": <short text>, "date": <YYYY-MM-DD>, "payment_method": <"cash" if user explicitly mentioned à vista/dinheiro/pix/débito/transferência, null otherwise>}}
 
     ### Scenario 1b: Registering INCOME
     User reports receiving money ("recebi", "entrou", "salário", "received", "earned", etc.):
@@ -346,6 +346,19 @@ async def _handle_classify(update: Update, context: ContextTypes.DEFAULT_TYPE, e
         # Load and cache user categories for this conversation
         user_cats = get_user_categories(db, APP_ID, firebase_uid)
         context.user_data["user_categories"] = user_cats
+
+        # Fast path: user already said "à vista" — just confirm
+        if extracted.get("payment_method") == "cash":
+            keyboard = [
+                [InlineKeyboardButton("✅ Sim, confirmar", callback_data="cash_confirm"),
+                 InlineKeyboardButton("✏️ Alterar algo", callback_data="cash_change")],
+            ]
+            await update.message.reply_text(
+                f"{_expense_confirmation(extracted)} — 💵 à vista\n\nEstá correto?",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            return CONFIRM_CASH
+
         keyboard = [
             [InlineKeyboardButton("💳 Sim, foi no cartão", callback_data="card_yes"),
              InlineKeyboardButton("💵 Não, à vista", callback_data="card_no")],
@@ -414,6 +427,41 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
 
 # ── ConversationHandler step callbacks ───────────────────────────────────────────────
+
+async def confirm_cash_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """User confirms or wants to change a detected à-vista expense."""
+    query = update.callback_query
+    await query.answer()
+    tx = context.user_data.get("tx", {})
+    fuid = context.user_data.get("firebase_uid")
+
+    if query.data == "cash_confirm":
+        ok = save_expense_with_card(db, APP_ID, fuid, tx)
+        if ok:
+            amount = float(tx['amount'])
+            await query.edit_message_text(
+                f"✅ Salvo: R$ {amount:.2f} em {tx['category']}".replace(".", ",", 1)
+            )
+            sofia = Sofia(db, APP_ID, client, fuid)
+            alert = await sofia.check_after_register(amount, tx['category'])
+            if alert:
+                await context.bot.send_message(chat_id=query.message.chat_id, text=alert)
+        else:
+            await query.edit_message_text("❌ Erro ao salvar. Tente novamente.")
+        return ConversationHandler.END
+
+    # cash_change — drop into the full card flow
+    keyboard = [
+        [InlineKeyboardButton("💳 Sim, foi no cartão", callback_data="card_yes"),
+         InlineKeyboardButton("💵 Não, à vista", callback_data="card_no")],
+        [InlineKeyboardButton("✏️ Alterar Categoria", callback_data="change_category")],
+    ]
+    await query.edit_message_text(
+        f"{_expense_confirmation(tx)}\n\n💳 Foi no cartão de crédito?",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return ASK_CARD
+
 
 async def ask_card_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """User chose Yes/No/ChangeCategory for credit card step."""
@@ -782,6 +830,9 @@ if __name__ == '__main__':
             MessageHandler(filters.VOICE, handle_voice),
         ],
         states={
+            CONFIRM_CASH: [
+                CallbackQueryHandler(confirm_cash_cb, pattern="^cash_(confirm|change)$"),
+            ],
             ASK_CARD: [
                 CallbackQueryHandler(ask_card_cb, pattern="^(card_yes|card_no|change_category)$"),
             ],
