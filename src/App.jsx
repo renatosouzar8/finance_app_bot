@@ -1007,20 +1007,25 @@ const Dashboard = ({ user, handleLogout, theme, toggleTheme, isTelegramModalOpen
         setGlobalLoading(loadingNormalTrans || loadingPayments);
     }, [loadingNormalTrans, loadingPayments]);
 
-    const filteredTransactions = useMemo(() => {
+    const monthlyTransactions = useMemo(() => {
         return combinedTransactions.filter(t => {
             const tDateObj = t.date?.toDate ? t.date.toDate() : (t.date ? new Date(t.date) : null);
             if (!tDateObj || !isValid(tDateObj)) return false;
-            const monthMatch = isSameMonth(tDateObj, currentMonth);
+            return isSameMonth(tDateObj, currentMonth);
+        });
+    }, [combinedTransactions, currentMonth]);
+
+    const filteredTransactions = useMemo(() => {
+        return monthlyTransactions.filter(t => {
             const typeMatch = transactionTypeFilter === 'all' || t.type === transactionTypeFilter;
             const searchTermLower = searchTerm.toLowerCase();
             const searchMatch = (t.description && t.description.toLowerCase().includes(searchTermLower)) ||
                 (t.category && t.category.toLowerCase().includes(searchTermLower));
             const categoryMatch = selectedCategories.length === 0 || selectedCategories.includes(t.category);
             const cardMatch = selectedCards.length === 0 || selectedCards.includes(t.creditCardId);
-            return monthMatch && typeMatch && searchMatch && categoryMatch && cardMatch;
+            return typeMatch && searchMatch && categoryMatch && cardMatch;
         });
-    }, [combinedTransactions, currentMonth, searchTerm, transactionTypeFilter, selectedCategories, selectedCards]);
+    }, [monthlyTransactions, searchTerm, transactionTypeFilter, selectedCategories, selectedCards]);
 
     // Calcula o saldo total das transações filtradas
     const totalFilteredTransactionsAmount = useMemo(() => {
@@ -1147,10 +1152,17 @@ const Dashboard = ({ user, handleLogout, theme, toggleTheme, isTelegramModalOpen
 
 
     const monthlySummary = useMemo(() => {
-        const income = filteredTransactions.filter(t => t.type === TRANSACTION_TYPES.INCOME).reduce((sum, t) => sum + (t.amount || 0), 0);
-        const expense = filteredTransactions.filter(t => t.type === TRANSACTION_TYPES.EXPENSE).reduce((sum, t) => sum + (t.amount || 0), 0);
+        const income = monthlyTransactions.filter(t => t.type === TRANSACTION_TYPES.INCOME).reduce((sum, t) => sum + (t.amount || 0), 0);
+        const expense = monthlyTransactions.filter(t => t.type === TRANSACTION_TYPES.EXPENSE).reduce((sum, t) => sum + (t.amount || 0), 0);
         return { income, expense, balance: income - expense };
-    }, [filteredTransactions]);
+    }, [monthlyTransactions]);
+
+    const filteredCategoryExpense = useMemo(() => {
+        if (selectedCategories.length === 0) return null;
+        return filteredTransactions
+            .filter(t => t.type === TRANSACTION_TYPES.EXPENSE)
+            .reduce((sum, t) => sum + (t.amount || 0), 0);
+    }, [filteredTransactions, selectedCategories]);
 
     // [REMOVED] Legacy Chart Data Memos (PieChart, Old Evolution)
     // Now using FinancialEvolutionChart which calculates its own evolution.
@@ -1238,8 +1250,8 @@ const Dashboard = ({ user, handleLogout, theme, toggleTheme, isTelegramModalOpen
                     <div className="space-y-6 animate-fade-in-up">
                         {/* THE NEW CHARTS GRID */}
                         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                            <FinancialEvolutionChart transactions={filteredTransactions} currentMonth={currentMonth} />
-                            <FinancialCategoryChart transactions={filteredTransactions} />
+                            <FinancialEvolutionChart transactions={monthlyTransactions} currentMonth={currentMonth} />
+                            <FinancialCategoryChart transactions={monthlyTransactions} />
                         </div>
 
                         {/* Recent Transactions List */}
@@ -1259,7 +1271,7 @@ const Dashboard = ({ user, handleLogout, theme, toggleTheme, isTelegramModalOpen
 
                             {/* Category Filter Pills - only categories present in current month */}
                             <div className="flex flex-wrap gap-2">
-                                {[...new Set(filteredTransactions.filter(t => t.category).map(t => t.category))].sort().map(cat => {
+                                {[...new Set(monthlyTransactions.filter(t => t.category).map(t => t.category))].sort().map(cat => {
                                     const isSelected = selectedCategories.includes(cat);
                                     return (
                                         <button
@@ -1286,6 +1298,18 @@ const Dashboard = ({ user, handleLogout, theme, toggleTheme, isTelegramModalOpen
                                     </button>
                                 )}
                             </div>
+
+                            {/* Total por categoria filtrada */}
+                            {filteredCategoryExpense !== null && (
+                                <div className="flex items-center justify-between px-4 py-2.5 bg-slate-800/60 border border-cyan-500/20 rounded-2xl">
+                                    <span className="text-xs text-slate-400 uppercase tracking-wider">
+                                        Total {selectedCategories.length === 1 ? `· ${selectedCategories[0]}` : `· ${selectedCategories.length} categorias`}
+                                    </span>
+                                    <span className="text-base font-bold text-rose-400 tabular-nums">
+                                        - R$ {filteredCategoryExpense.toFixed(2)}
+                                    </span>
+                                </div>
+                            )}
 
                             {/* Credit Card Filter Pills */}
                             {allCards.length > 0 && (
